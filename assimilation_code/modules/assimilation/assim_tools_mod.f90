@@ -2203,25 +2203,11 @@ nx = (x_in - mean) / sd
 
 x = abs(nx)
 
-
-! Use formula from Abramowitz and Stegun to approximate
-p = 0.2316419_digits12
-b1 = 0.319381530_digits12
-b2 = -0.356563782_digits12
-b3 = 1.781477937_digits12
-b4 = -1.821255978_digits12
-b5 = 1.330274429_digits12
-
-t = 1.0_digits12 / (1.0_digits12 + p * x)
-
-density = (1.0_digits12 / sqrt(2.0_digits12 * PI)) * exp(-x*x / 2.0_digits12)
-
-norm_cdf = 1.0_digits12 - density * &
-   ((((b5 * t + b4) * t + b3) * t + b2) * t + b1) * t
-
-if(nx < 0.0_digits12) norm_cdf = 1.0_digits12 - norm_cdf
-
-!write(*, *) 'cdf is ', norm_cdf
+if(nx < 0.0_digits12) then
+   norm_cdf = 0.5_digits12 * erfc(-nx / sqrt(2.0_digits12))
+else
+   norm_cdf = 0.5_digits12 * (1.0_digits12 + erf(nx / sqrt(2.0_digits12)))
+endif
 
 end function norm_cdf
 
