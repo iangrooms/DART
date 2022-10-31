@@ -2196,12 +2196,10 @@ function norm_cdf(x_in, mean, sd)
 real(r8)             :: norm_cdf
 real(r8), intent(in) :: x_in, mean, sd
 
-real(digits12) :: x, p, b1, b2, b3, b4, b5, t, density, nx
+real(digits12) :: nx
 
 ! Convert to a standard normal
 nx = (x_in - mean) / sd
-
-x = abs(nx)
 
 if(nx < 0.0_digits12) then
    norm_cdf = 0.5_digits12 * erfc(-nx / sqrt(2.0_digits12))
