@@ -1,0 +1,5 @@
+# Generate a bad mixing ratio file:
+ncgen -o example.nc example.cdl 
+
+# Run matlab script to fix mmr
+matlab -nojvm  -nodisplay -r "fixmmr('example.nc');exit"
