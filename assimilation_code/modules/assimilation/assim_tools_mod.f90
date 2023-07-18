@@ -83,6 +83,8 @@ use gamma_distribution_mod, only : gamma_cdf, inv_gamma_cdf, gamma_mn_var_to_sha
 
 use bnrh_distribution_mod, only   :  inv_bnrh_cdf, bnrh_cdf, inv_bnrh_cdf_like
 
+use kde_distribution_mod, only : kde_cdf, inv_kde_cdf, obs_dist_types
+
 use distribution_params_mod, only : distribution_params_type, deallocate_distribution_params
                                
 
@@ -918,7 +920,7 @@ end subroutine filter_assim
 !-------------------------------------------------------------
 
 subroutine obs_increment(ens_in, ens_size, obs, obs_var, obs_kind, obs_inc, &
-   inflate, my_cov_inflate, my_cov_inflate_sd, net_a)
+   inflate, my_cov_inflate, my_cov_inflate_sd, net_a, obs_dist_type)
 
 ! Given the ensemble prior for an observation, the observation, and
 ! the observation error variance, computes increments and adjusts
@@ -931,6 +933,7 @@ real(r8),                    intent(out)   :: obs_inc(ens_size)
 type(adaptive_inflate_type), intent(inout) :: inflate
 real(r8),                    intent(inout) :: my_cov_inflate, my_cov_inflate_sd
 real(r8),                    intent(out)   :: net_a
+integer, optional,           intent(in)    :: obs_dist_type
 
 real(r8) :: ens(ens_size), inflate_inc(ens_size)
 real(r8) :: prior_mean, prior_var, new_val(ens_size)
@@ -1075,6 +1078,21 @@ else
       !!!endif
 
    !--------------------------------------------------------------------------
+   else if(filter_kind == 102) then
+      ! obs_dist_type is an integer whose value is provided by kde_distribution_mod
+      ! Options are uninformative, normal, binomial, gamma,
+      ! inv_gamma, and lognormal. Details can be found in the definition
+      ! of the likelihood function in kde_distribution_mod.f90. Different types
+      ! of observations have different interpretations for `obs_var'.
+      if (.not. present(obs_dist_type)) then
+         call error_handler(E_ERR,'obs_increment', &
+                 'For kde filter, must specify obs_dist_type', source)
+      else
+         call obs_increment_kde(ens, ens_size, obs, obs_var, obs_dist_type, &
+            bounded_below, bounded_above, lower_bound, upper_bound, obs_inc)
+      end if
+
+   !--------------------------------------------------------------------------
    else
       call error_handler(E_ERR,'obs_increment', &
               'Illegal value of filter_kind in assim_tools namelist [1-8 OK]', source)
@@ -1103,6 +1121,48 @@ endif
 if(do_obs_inflate(inflate)) net_a = net_a * sqrt(my_cov_inflate)
 
 end subroutine obs_increment
+
+
+
+subroutine obs_increment_kde(ens, ens_size, y, obs_param, obs_dist_type, &
+   bounded_below, bounded_above, lower_bound, upper_bound, obs_inc)
+   integer,  intent(in)  :: ens_size
+   real(r8), intent(in)  :: ens(ens_size)
+   real(r8), intent(in)  :: y
+   real(r8), intent(in)  :: obs_param
+   integer,  intent(in)  :: obs_dist_type
+   logical,  intent(in)  :: bounded_below, bounded_above
+   real(r8), intent(in)  :: lower_bound,   upper_bound
+   real(r8), intent(out) :: obs_inc(ens_size)
+
+   ! Applies a QCEF based on kernel density estimation & quadrature
+
+   real(r8) :: prior_mean, prior_var
+   real(r8) :: q
+   integer i
+
+   ! If all ensemble members are identical, this algorithm becomes undefined, so fail
+   prior_mean = sum(ens(:)) / real(ens_size, r8)
+   prior_var  = sum((ens(:)-prior_mean)**2) / (real(ens_size,r8) - 1._r8)
+   if(prior_var <= 0.0_r8) then
+         msgstring = 'Ensemble variance <= 0 '
+         call error_handler(E_ERR, 'obs_increment_kde', msgstring, source)
+   endif
+
+   do i=1,ens_size
+      ! Map each ensemble member to a quantile using the prior cdf. (Using
+      ! obs_dist_type = obs_dist_types%uninformative signals that we're using
+      ! the prior; values of y and obs_param are ignored.) Then get the
+      ! increment by using the inverse of the posterior cdf to map back to
+      ! ensemble space.
+      q = kde_cdf(ens(i), ens, ens_size, bounded_below, bounded_above, &
+         lower_bound, upper_bound, y, obs_param, obs_dist_types%uninformative)
+      ! Invert the posterior kde cdf to get the increment
+      obs_inc(i) = inv_kde_cdf(q, ens, ens_size, bounded_below, bounded_above, &
+         lower_bound, upper_bound, y, obs_param, obs_dist_type) - ens(i)
+   end do
+
+end subroutine obs_increment_kde
 
 
 
@@ -1171,6 +1231,7 @@ obs_inc = a * (ens - prior_mean) + new_mean - ens
 end subroutine obs_increment_eakf
 
 
+
 subroutine obs_increment_bounded_norm_rhf(ens, ens_like, ens_size, prior_var, &
    obs_inc, bounded_below, bounded_above, lower_bound, upper_bound)
 !------------------------------------------------------------------------
@@ -1230,7 +1291,6 @@ do i = 1, ens_size
 end do
 
 end subroutine obs_increment_bounded_norm_rhf
-
 
 
 
