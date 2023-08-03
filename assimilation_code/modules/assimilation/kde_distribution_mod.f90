@@ -4,21 +4,21 @@
 
 module kde_distribution_mod
 
-use types_mod,               only : r8, missing_r8
+use types_mod,               only : r8
 
 use utilities_mod,           only : E_ERR, E_MSG, error_handler
 
-use normal_distribution_mod, only : inv_cdf
-
-use sort_mod,                only : sort, index_sort
+use sort_mod,                only : sort
 
 use distribution_params_mod, only : distribution_params_type, deallocate_distribution_params
+
+use rootfinding_mod,         only : inv_cdf
 
 implicit none
 private
 
 public :: kde_cdf, kde_cdf_params, inv_kde_cdf, inv_kde_cdf_params,     &
-          test_kde, obs_dist_types
+          test_kde, obs_dist_types, likelihood_function
 
 type available_obs_dist_types
    integer  :: uninformative, normal, binomial, gamma, &
@@ -35,7 +35,7 @@ contains
 
 !---------------------------------------------------------------------------
 
-function likelihood(x, y, obs_param, obs_dist_type) result(l)
+function likelihood_function(x, y, obs_param, obs_dist_type) result(l)
    real(r8)             :: l  ! likelihood value
    real(r8), intent(in) :: x  ! state value
    real(r8), intent(in) :: y  ! obs value
@@ -49,6 +49,8 @@ function likelihood(x, y, obs_param, obs_dist_type) result(l)
 
    real(r8) :: gamma_shape, gamma_scale
    real(r8) :: inv_gamma_shape, inv_gamma_scale
+
+   l = 1._r8 ! Initialize
 
    select case (obs_dist_type)
       case (obs_dist_types%uninformative)
@@ -140,7 +142,7 @@ function likelihood(x, y, obs_param, obs_dist_type) result(l)
          call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
    end select
 
-end function likelihood
+end function likelihood_function
 
 !---------------------------------------------------------------------------
 
@@ -211,7 +213,7 @@ function kde_pdf(x, p)
                           (lx_upper + mx_upper * u_upper) * &
                           biweight_kernel( (x - p%ens(i)) / p%more_params(i) )
    end do
-   kde_pdf = kde_pdf / (p%ens_size * p%more_params(p%ens_size + 1)) ! p%more_params(end) normalizes the pdf
+   kde_pdf = kde_pdf / (p%ens_size * p%more_params(p%ens_size + 1)) ! p%more_params(ens_size + 1) normalizes the pdf
 
 end function kde_pdf
 
@@ -235,7 +237,7 @@ subroutine get_kde_bandwidths(ens_size, ens, bandwidths)
       d(:) = sort( abs( ens(:) - ens(i) ) ) ! Sorted neighbor distances
       f_tilde(i) = 0.5_r8 * real(k, r8) / (real(ens_size, r8) * d(k+1)) ! Initial density estimate
    end do
-   g = product( f_tilde )**(1._r8 / real(ens_size, r8) )
+   g = product( f_tilde )**( 1._r8 / real(ens_size, r8) )
    lambda(:) = sqrt( g / f_tilde(:) )
    bandwidths(:) = h0 * lambda(:)
 
@@ -278,15 +280,15 @@ function integrate_pdf(x, p) result(q)
    ! Unpack obs info from param struct
    y         = p%more_params(p%ens_size + 2)
    obs_param = p%more_params(p%ens_size + 3)
-   obs_dist_type  = p%more_params(p%ens_size + 4)
+   obs_dist_type  = nint(p%more_params(p%ens_size + 4))
 
    edges(1:p%ens_size)                = p%ens(:) - p%more_params(1:p%ens_size)
    edges(p%ens_size + 1:2*p%ens_size) = p%ens(:) + p%more_params(1:p%ens_size)
    edges(:) = sort(edges(:)) ! If bandwidths were constant we would not need to sort
 
    ! If x is outside the support of the pdf then we can skip the quadrature.
-   ! Note that when bounded_below=false I still set lower_bound=edges(1).
-   left = max(edges(1), p%lower_bound)
+   left = edges(1)
+   if (p%bounded_below) left = max(left, p%lower_bound)
    if (x .le. left) then
       q = 0._r8
       return
@@ -294,8 +296,7 @@ function integrate_pdf(x, p) result(q)
 
    ! Important to use x .gt. upper_bound here because I use
    ! x = upper_bound to compute the normalization constant.
-   ! When bounded_above=false I still set upper_bound=maxval(edges).
-   if (x .gt. p%upper_bound) then
+   if ((p%bounded_above) .and. (x .gt. p%upper_bound)) then
       q = 1._r8
       return
    end if
@@ -307,7 +308,7 @@ function integrate_pdf(x, p) result(q)
    do k=1,5
       xi = 0.5_r8 * ((right - left) * chi(k) + left + right)
       q  = q + 0.5_r8 * (right - left) * w(k) * kde_pdf(xi, p) * &
-           likelihood(xi, y, obs_param, obs_dist_type)
+           likelihood_function(xi, y, obs_param, obs_dist_type)
    end do
    do while ((x .gt. right) .and. (i+1 .lt. 2*p%ens_size))
       i     = i + 1
@@ -316,7 +317,7 @@ function integrate_pdf(x, p) result(q)
       do k=1,5
          xi = 0.5_r8 * ((right - left) * chi(k) + left + right)
          q  = q + 0.5_r8 * (right - left) * w(k) * kde_pdf(xi, p) * &
-              likelihood(xi, y, obs_param, obs_dist_type)
+              likelihood_function(xi, y, obs_param, obs_dist_type)
       end do
    end do
    ! Note that it is possible to have maxval(edges) < x < upper_bound,
@@ -386,7 +387,7 @@ subroutine pack_kde_params(ens_size, bounded_below, bounded_above, lower_bound, 
    ! Pack obs information
    p%more_params(ens_size + 2) = y
    p%more_params(ens_size + 3) = obs_param
-   p%more_params(ens_size + 4) = obs_dist_type
+   p%more_params(ens_size + 4) = real(obs_dist_type, r8) ! This is not ideal because it involves a type conversion from int to real
 
    ! Get the normalization constant
    p%more_params(ens_size + 1) = 1._r8 ! This value is used below
@@ -399,7 +400,9 @@ subroutine pack_kde_params(ens_size, bounded_below, bounded_above, lower_bound, 
       ! quadrature to integrate the pdf from -infty to the upper end
       ! of the support using a normalization constant of 1, then
       ! packs the result into p%more_params(ens_size+1)
-      p%more_params(ens_size + 1) = integrate_pdf(p%upper_bound, p)
+      edge = maxval(p%ens(:) + bandwidths(:))
+      if (p%bounded_above) edge = min(edge, p%upper_bound)
+      p%more_params(ens_size + 1) = integrate_pdf(edge, p)
    end if
 
 end subroutine pack_kde_params
@@ -424,7 +427,7 @@ function kde_cdf_params(x, p) result(quantile)
    bandwidths(:) = p%more_params(1:p%ens_size)
    y             = p%more_params(p%ens_size + 2)
    obs_param     = p%more_params(p%ens_size + 3)
-   obs_dist_type = p%more_params(p%ens_size + 4)
+   obs_dist_type = nint(p%more_params(p%ens_size + 4))
 
    quantile = 0._r8
    ! If the likelihood is uninformative and the distribution is unbounded, we can evaluate
@@ -433,7 +436,7 @@ function kde_cdf_params(x, p) result(quantile)
                           (obs_dist_type .eq. obs_dist_types%uninformative) )
    if (use_analytical_cdf) then
       do i=1,p%ens_size
-         quantile = quantile + biweight_cdf( (x - p%ens(i)) / bandwidths(i) ) / bandwidths(i)
+         quantile = quantile + biweight_cdf( (x - p%ens(i)) / bandwidths(i) ) / p%ens_size
       end do
    else ! Compute cdf using quadrature
       quantile  = integrate_pdf(x, p)
@@ -510,18 +513,44 @@ function inv_kde_first_guess_params(quantile, p) result(x)
    real(r8)                                   :: x
    real(r8),                       intent(in) :: quantile
    type(distribution_params_type), intent(in) :: p
+   real(r8) :: edge ! edge of support of the cdf
 
    ! This first-guess subroutine evaluates the cdf at the ensemble members,
    ! then finds a pair of ensemble members whose quantiles bracket the
    ! target quantile, then sets the first guess to a convex combination of
-   ! these two ensemble members.
+   ! these two ensemble members. If the target quantile is outside the
+   ! ensemble, the first guess is the nearest ensemble member. If the
+   ! target quantile is 0 or 1, the appropriate bound is returned.
 
    real(r8) :: q0, q1
    integer  :: i
 
+   if (quantile .eq. 0._r8) then
+      edge = minval(p%ens(:) - p%more_params(1:p%ens_size))
+      if (p%bounded_below) then
+         edge = max(edge, p%lower_bound)
+      end if
+      x = edge
+      return
+   end if
+
+   if (quantile .eq. 1._r8) then
+      edge = maxval(p%ens(:) + p%more_params(1:p%ens_size))
+      if (p%bounded_above) then
+         edge = min(edge, p%upper_bound)
+      end if
+      x = edge
+      return
+   end if
+
    q0 = kde_cdf_params(p%ens(1), p)
-   if (q0 .ge. quantile) then
+   if (quantile .le. q0) then
       x = p%ens(1)
+      ! edge = minval(p%ens(:) - p%more_params(1:p%ens_size))
+      ! if (p%bounded_below) then
+      !    edge = max(edge, p%lower_bound)
+      ! end if
+      ! x = ((q0 - quantile) * edge + quantile * p%ens(1)) / q0
       return
    end if
    do i=1,p%ens_size-1
@@ -534,6 +563,13 @@ function inv_kde_first_guess_params(quantile, p) result(x)
       q0 = q1
    end do
    x = p%ens(p%ens_size)
+   ! ! If we get this far then quantile > cdf(p%ens(end)) = q0.
+   ! edge = maxval(p%ens(:) + p%more_params(1:p%ens_size))
+   ! if (p%bounded_above) then
+   !    edge = min(edge, p%upper_bound)
+   ! end if
+   ! x = ((1._r8 - quantile) * p%ens(p%ens_size) + (quantile - q0) * edge) / &
+   !     (1._r8 - q0)
 
 end function inv_kde_first_guess_params
 
@@ -542,12 +578,10 @@ end function inv_kde_first_guess_params
 subroutine test_kde
    ! This routine provides limited tests of the numerics in this module. It tests
    ! the boundary correction function, the likelihood, the bandwidth selection,
-   ! and the cdf inversion. It uses an ensemble [-1, 1]. It tests the bandwidth selection and the cdf inversion
-   ! with zero, one, or two bounds at [-2, 2]. Failing these tests suggests a
-   ! serious problem. Passing them does not indicate that there are acceptable
-   ! results for all possible inputs.
-
-   ! TODO: Add test for likelihood(s)
+   ! and the cdf inversion. It uses an ensemble [-1, 1]. It tests the bandwidth
+   ! selection and the cdf inversion with zero, one, or two bounds at [-2, 2].
+   ! Failing these tests suggests a serious problem. Passing them does not indicate
+   ! that there are acceptable results for all possible inputs.
 
    integer,             parameter :: ens_size = 2
    real(r8),  dimension(ens_size) :: ensemble, bandwidths, target_bandwidths
@@ -571,7 +605,7 @@ subroutine test_kde
    obs_dist_type = obs_dist_types%uninformative
    do i = 0, 1000
       x = ((real(i, r8) - 500.0_r8) / 500.0_r8) * (1._r8 + target_bandwidths(1))
-      like = likelihood(x, y, obs_param, obs_dist_type)
+      like = likelihood_function(x, y, obs_param, obs_dist_type)
       max_diff = max(abs(1._r8 - like), max_diff)
    end do
    write(*, *) '----------------------------'
@@ -584,7 +618,7 @@ subroutine test_kde
    y = 0._r8
    obs_param = 1._r8
    obs_dist_type = obs_dist_types%normal
-   like = likelihood(x, y, obs_param, obs_dist_type)
+   like = likelihood_function(x, y, obs_param, obs_dist_type)
    write(*, *) '----------------------------'
    write(*, *) 'Normal likelihood test'
    write(*, *) 'abs difference in likelihood is ', abs(0.8824969025845955_r8 - like)
@@ -595,7 +629,7 @@ subroutine test_kde
    y = 3._r8
    obs_param = 5._r8
    obs_dist_type = obs_dist_types%binomial
-   like = likelihood(x, y, obs_param, obs_dist_type)
+   like = likelihood_function(x, y, obs_param, obs_dist_type)
    write(*, *) '----------------------------'
    write(*, *) 'Binomial obs distribution test'
    write(*, *) 'abs difference in likelihood is ', abs(0.0087890625_r8 - like)
@@ -606,7 +640,7 @@ subroutine test_kde
    x = 2._r8
    obs_param = 3._r8
    obs_dist_type = obs_dist_types%gamma
-   like = likelihood(x, y, obs_param, obs_dist_type)
+   like = likelihood_function(x, y, obs_param, obs_dist_type)
    write(*, *) '----------------------------'
    write(*, *) 'Gamma obs distribution test'
    write(*, *) 'abs difference in likelihood is ', abs(0.4658368455179406_r8 - like)
@@ -617,7 +651,7 @@ subroutine test_kde
    x = 2._r8
    obs_param = 4._r8
    obs_dist_type = obs_dist_types%inv_gamma
-   like = likelihood(x, y, obs_param, obs_dist_type)
+   like = likelihood_function(x, y, obs_param, obs_dist_type)
    write(*, *) '----------------------------'
    write(*, *) 'Inverse gamma obs distribution test'
    write(*, *) 'abs difference in likelihood is ', abs(3.415489474106968_r8 - like)
@@ -628,92 +662,100 @@ subroutine test_kde
    x = 2._r8
    obs_param = 4._r8
    obs_dist_type = obs_dist_types%lognormal
-   like = likelihood(x, y, obs_param, obs_dist_type)
+   like = likelihood_function(x, y, obs_param, obs_dist_type)
    write(*, *) '----------------------------'
    write(*, *) 'Lognormal obs distribution test'
    write(*, *) 'abs difference in likelihood is ', abs(0.6065306597126334_r8 - like)
    write(*, *) 'abs difference should be less than 1e-15'
 
    ! Test bandwidth selection
-   target_bandwidths(:) = 8.217997317515410_r8 * [1._r8, 1._r8]
+   target_bandwidths(:) = 2.905500815494003_r8 * [1._r8, 1._r8]
 
    ensemble(:) = [-1._r8, 1._r8]
 
    call get_kde_bandwidths(ens_size, ensemble, bandwidths)
 
    ! Compare computed bandwidths to exact
+   write(*, *) '----------------------------'
    write(*, *) 'kde bandwidths test: Absolute value of differences should be less than 1e-15'
    do i = 1, ens_size
       write(*, *) i, abs(bandwidths(i) - target_bandwidths(i))
    end do
 
-   ! Test the inversion of the cdf over the entire support of the pdf, unbounded
+   ! Test the inversion of the cdf over the support of the pdf, unbounded
+   write(*, *) '----------------------------'
+   write(*, *) 'Unbounded cdf/icdf test'
    call pack_kde_params(ens_size, .false., .false., 0._r8, 0._r8, &
       ensemble, 0._r8, 1._r8, obs_dist_types%uninformative, p)
 
    max_diff = -1.0_r8
-   do i = 0, 1000
-      x = ((real(i, r8) - 500.0_r8) / 500.0_r8) * (1._r8 + target_bandwidths(1))
+   do i = 2, 998
+      x = (real(i - 500, r8) / 500.0_r8) * (1._r8 + target_bandwidths(1))
       y = kde_cdf_params(x, p)
       inv = inv_kde_cdf_params(y, p)
+      ! write(*,*) 'Quantile: ', y, 'Exact x: ', x, 'Inverted x: ', inv, 'Error: ', abs(inv - x)
       max_diff = max(abs(x-inv), max_diff)
    end do
 
-   write(*, *) '----------------------------'
-   write(*, *) 'Unbounded cdf/icdf test'
    write(*, *) 'max difference in inversion is ', max_diff
-   write(*, *) 'max difference should be less than 1e-11'
+   write(*, *) 'Errors should be small, max around 1E-8'
+   ! The accuracy degrades near the boundary. I believe this is because the slope goes to 0 at the boundary.
+   ! It's worse at the upper boundary because precision is worse near q=1 than near q=0.
 
    call deallocate_distribution_params(p)
 
    ! Test the inversion of the cdf over the entire support of the pdf, bounded below
+   write(*, *) '----------------------------'
+   write(*, *) 'cdf/icdf test bounded below'
    call pack_kde_params(ens_size, .true., .false., -2._r8, 0._r8, &
       ensemble, 0._r8, 1._r8, obs_dist_types%uninformative, p)
 
    max_diff = -1.0_r8
-   do i = 0, 1000
-      x = ((real(i, r8) - 500.0_r8) / 500.0_r8) * (1._r8 + target_bandwidths(1))
+   do i = 0, 998
+      x = (real(i - 500, r8) / 500.0_r8) * (1._r8 + target_bandwidths(1))
       if (x .le. -2._r8) then
          cycle
       else
          y = kde_cdf_params(x, p)
          inv = inv_kde_cdf_params(y, p)
+         ! write(*,*) 'Quantile: ', y, 'Exact x: ', x, 'Inverted x: ', inv, 'Error: ', abs(inv - x)
          max_diff = max(abs(x-inv), max_diff)
       end if
    end do
 
-   write(*, *) '----------------------------'
-   write(*, *) 'cdf/icdf test bounded below'
    write(*, *) 'max difference in inversion is ', max_diff
-   write(*, *) 'max difference should be less than 1e-11'
+   write(*, *) 'Errors should be small, max below 2E-8'
 
    call deallocate_distribution_params(p)
 
 
    ! Test the inversion of the cdf over the entire support of the pdf, bounded above
+   write(*, *) '----------------------------'
+   write(*, *) 'cdf/icdf test bounded above'
    call pack_kde_params(ens_size, .false., .true., 0._r8, 2._r8, &
       ensemble, 0._r8, 1._r8, obs_dist_types%uninformative, p)
 
    max_diff = -1.0_r8
-   do i = 0, 1000
+   do i = 2, 1000
       x = ((real(i, r8) - 500.0_r8) / 500.0_r8) * (1._r8 + target_bandwidths(1))
       if (x .ge. 2._r8) then
          cycle
       else
          y = kde_cdf_params(x, p)
          inv = inv_kde_cdf_params(y, p)
+         ! write(*,*) 'Quantile: ', y, 'Exact x: ', x, 'Inverted x: ', inv, 'Error: ', abs(inv - x)
          max_diff = max(abs(x-inv), max_diff)
       end if
    end do
 
-   write(*, *) '----------------------------'
-   write(*, *) 'cdf/icdf test bounded below'
    write(*, *) 'max difference in inversion is ', max_diff
-   write(*, *) 'max difference should be less than 1e-11'
+   write(*, *) 'Errors should be small, max below 2E-8'
 
    call deallocate_distribution_params(p)
 
    ! Test the inversion of the cdf over the entire support of the pdf, doubly bounded
+   write(*, *) '----------------------------'
+   write(*, *) 'cdf/icdf test doubly-bounded'
    call pack_kde_params(ens_size, .true., .true., -2._r8, 2._r8, &
       ensemble, 0._r8, 1._r8, obs_dist_types%uninformative, p)
 
@@ -725,31 +767,35 @@ subroutine test_kde
       else
          y = kde_cdf_params(x, p)
          inv = inv_kde_cdf_params(y, p)
+         ! write(*,*) 'Quantile: ', y, 'Exact x: ', x, 'Inverted x: ', inv, 'Error: ', abs(inv - x)
          max_diff = max(abs(x-inv), max_diff)
       end if
    end do
 
-   write(*, *) '----------------------------'
-   write(*, *) 'cdf/icdf test bounded below'
    write(*, *) 'max difference in inversion is ', max_diff
-   write(*, *) 'max difference should be less than 1e-11'
+   write(*, *) 'Errors should be small, max below 2E-8'
+
+   call deallocate_distribution_params(p)
 
    ! Test the quadrature: Construct a case with bounds, but where the bounds are
    ! far enough from the data that they are not used. In this case the kernel
    ! density estimate should integrate exactly to one.
+   call pack_kde_params(ens_size, .true., .true., -2._r8, 2._r8, &
+      ensemble, 0._r8, 1._r8, obs_dist_types%uninformative, p)
    p%lower_bound = -20._r8
    p%upper_bound =  20._r8
+   p%more_params(ens_size + 1) = 1._r8
 
-   y = integrate_pdf(20._r8, p)
+   y = integrate_pdf(0._r8, p)
    write(*, *) '----------------------------'
    write(*, *) 'test quadrature'
-   write(*, *) 'abs difference is ', abs(1._r8 - y)
+   write(*, *) 'abs difference is ', abs(0.5_r8 - y)
    write(*, *) 'abs difference should be less than 1e-15'
 
    call deallocate_distribution_params(p)
 
 end subroutine test_kde
 
-!-----------------------------------------------------------------------
+!------------------------------------------------------------------------
 
 end module kde_distribution_mod
