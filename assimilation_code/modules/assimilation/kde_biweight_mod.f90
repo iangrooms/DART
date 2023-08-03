@@ -2,7 +2,7 @@
 ! by UCAR, "as is", without charge, subject to all terms of use at
 ! http://www.image.ucar.edu/DAReS/DART/DART_download
 
-module kde_distribution_mod
+module kde_biweight_mod
 
 use types_mod,               only : r8
 
@@ -146,29 +146,25 @@ end function likelihood_function
 
 !---------------------------------------------------------------------------
 
-elemental function epanechnikov_kernel(x) ! The fact that this is elemental is not (yet) used
-   real(r8) :: epanechnikov_kernel
+elemental function biweight_kernel(x) ! The fact that this is elemental is not (yet) used
+   real(r8) :: biweight_kernel
    real(r8), intent(in) :: x
-   real(r8), parameter  :: norm_const = 3._r8 / 4._r8
-   epanechnikov_kernel = norm_const * max(0._r8, 1._r8 - x**2)
+   real(r8), parameter  :: norm_const = 15._r8 / 16._r8
+   biweight_kernel = norm_const * max(0._r8, 1._r8 - x**2)**2
 
-end function epanechnikov_kernel
+end function biweight_kernel
 
 !---------------------------------------------------------------------------
 
-elemental function epanechnikov_cdf(x) ! The fact that this is elemental is not (yet) used
-   real(r8) :: epanechnikov_cdf
+elemental function biweight_cdf(x) ! The fact that this is elemental is not (yet) used
+   real(r8) :: biweight_cdf
    real(r8), intent(in) :: x
-   real(r8), parameter  :: norm_const = 1._r8 / 4._r8
-   if (x .le. -1._r8) then
-      epanechnikov_cdf = 0._r8
-   elseif (x .le. 1._r8) then
-      epanechnikov_cdf = min(1._r8, max(0._r8, norm_const * (2._r8 + 3._r8 * x - x**3)))
-   else
-      epanechnikov_cdf = 1._r8
-   end if
+   real(r8), parameter  :: norm_const = 1._r8 / 16._r8
+   biweight_cdf = min(1._r8, max(0._r8,                                    &
+         norm_const * ((1._r8 + x)**3) * (8._r8 + 3._r8 * x * (x - 3._r8)) &
+                                                                          ))
 
-end function epanechnikov_cdf
+end function biweight_cdf
 
 !---------------------------------------------------------------------------
 
@@ -181,9 +177,9 @@ elemental subroutine boundary_correction(x, lx, mx)
 
    real(r8) :: denom
 
-   denom = ((1._r8 + x)**4) * (19._r8 + 3._r8 * x * (x - 6._r8))
-   lx =-64._r8 * (-2._r8 + x * (4._r8 + 3._r8 * x * (x - 2._r8))) / denom
-   mx = 240._r8 * (x - 1._r8)**2 / denom
+   denom = (5._r8 * x**4 - 40._r8 * x**3 + 126._r8 * x**2 - 168._r8 * x + 81._r8) * (x+1._r8)**5
+   lx = 64._r8 * (15._r8 * x**4 - 45._r8 * x**3 + 48._r8 * x**2 - 24._r8 * x + 8._r8) / denom
+   mx =-1120._r8 * ((x - 1._r8)**3) / denom
 
 end subroutine boundary_correction
 
@@ -215,7 +211,7 @@ function kde_pdf(x, p)
       kde_pdf = kde_pdf + (1._r8 / p%more_params(i)) * &
                           (lx_lower + mx_lower * u_lower) * &
                           (lx_upper + mx_upper * u_upper) * &
-                          epanechnikov_kernel( (x - p%ens(i)) / p%more_params(i) )
+                          biweight_kernel( (x - p%ens(i)) / p%more_params(i) )
    end do
    kde_pdf = kde_pdf / (p%ens_size * p%more_params(p%ens_size + 1)) ! p%more_params(ens_size + 1) normalizes the pdf
 
@@ -234,8 +230,8 @@ subroutine get_kde_bandwidths(ens_size, ens, bandwidths)
 
    ens_mean = sum(ens) / ens_size
    ens_sd   = sqrt( sum( (ens - ens_mean)**2 ) / (ens_size - 1._r8) )
-   h0 = 2._r8 * ens_sd / (ens_size**0.2_r8) ! This would be the kernel width if the widths were not adaptive.
-                                            ! It would be better to use min(sd, iqr/1.34) but don't want to compute iqr
+   h0 = 2.36_r8 * ens_sd / (ens_size**0.2_r8) ! This would be the kernel width if the widths were not adaptive.
+                                              ! It would be better to use min(sd, iqr/1.34) but don't want to compute iqr
    k = floor( sqrt( real(ens_size) ) ) ! distance to kth nearest neighbor used to set bandwidth
    do i=1,ens_size
       d(:) = sort( abs( ens(:) - ens(i) ) ) ! Sorted neighbor distances
@@ -440,7 +436,7 @@ function kde_cdf_params(x, p) result(quantile)
                           (obs_dist_type .eq. obs_dist_types%uninformative) )
    if (use_analytical_cdf) then
       do i=1,p%ens_size
-         quantile = quantile + epanechnikov_cdf( (x - p%ens(i)) / bandwidths(i) ) / p%ens_size
+         quantile = quantile + biweight_cdf( (x - p%ens(i)) / bandwidths(i) ) / p%ens_size
       end do
    else ! Compute cdf using quadrature
       quantile  = min(1._r8, max(0._r8, integrate_pdf(x, p)))
@@ -549,12 +545,12 @@ function inv_kde_first_guess_params(quantile, p) result(x)
 
    q0 = kde_cdf_params(p%ens(1), p)
    if (quantile .le. q0) then
-      ! x = p%ens(1)
-      edge = minval(p%ens(:) - p%more_params(1:p%ens_size))
-      if (p%bounded_below) then
-         edge = max(edge, p%lower_bound)
-      end if
-      x = ((q0 - quantile) * edge + quantile * p%ens(1)) / q0
+      x = p%ens(1)
+      ! edge = minval(p%ens(:) - p%more_params(1:p%ens_size))
+      ! if (p%bounded_below) then
+      !    edge = max(edge, p%lower_bound)
+      ! end if
+      ! x = ((q0 - quantile) * edge + quantile * p%ens(1)) / q0
       return
    end if
    do i=1,p%ens_size-1
@@ -566,14 +562,14 @@ function inv_kde_first_guess_params(quantile, p) result(x)
       end if ; end if
       q0 = q1
    end do
-   ! x = p%ens(p%ens_size)
-   ! If we get this far then quantile > cdf(p%ens(end)) = q0.
-   edge = maxval(p%ens(:) + p%more_params(1:p%ens_size))
-   if (p%bounded_above) then
-      edge = min(edge, p%upper_bound)
-   end if
-   x = ((1._r8 - quantile) * p%ens(p%ens_size) + (quantile - q0) * edge) / &
-       (1._r8 - q0)
+   x = p%ens(p%ens_size)
+   ! ! If we get this far then quantile > cdf(p%ens(end)) = q0.
+   ! edge = maxval(p%ens(:) + p%more_params(1:p%ens_size))
+   ! if (p%bounded_above) then
+   !    edge = min(edge, p%upper_bound)
+   ! end if
+   ! x = ((1._r8 - quantile) * p%ens(p%ens_size) + (quantile - q0) * edge) / &
+   !     (1._r8 - q0)
 
 end function inv_kde_first_guess_params
 
@@ -593,13 +589,13 @@ subroutine test_kde
    real(r8)                       :: x, y, inv, max_diff, lx, mx, like, obs_param
    integer                        :: i, obs_dist_type
 
-   ! Test the boundary correction code against a Mathematica implementation
+   ! Test the boundary correction code against a Matlab implementation (R2020a)
    x = 0.5_r8
    call boundary_correction(x, lx, mx)
    write(*, *) '----------------------------'
    write(*, *) 'test boundary correction'
-   write(*, *) 'abs difference in lx is ', abs(1.322997416020672_r8 - lx)
-   write(*, *) 'abs difference in mx is ', abs(1.102497846683893_r8 - mx)
+   write(*, *) 'abs difference in lx is ', abs(1.172396660294006_r8 - lx)
+   write(*, *) 'abs difference in mx is ', abs(0.7742242096281174_r8 - mx)
    write(*, *) 'abs differences should be less than 1e-15'
 
    ! Test uninformative likelihood
@@ -673,7 +669,7 @@ subroutine test_kde
    write(*, *) 'abs difference should be less than 1e-15'
 
    ! Test bandwidth selection
-   target_bandwidths(:) = 2.462288826689833_r8 * [1._r8, 1._r8]
+   target_bandwidths(:) = 2.905500815494003_r8 * [1._r8, 1._r8]
 
    ensemble(:) = [-1._r8, 1._r8]
 
@@ -697,15 +693,15 @@ subroutine test_kde
       x = (real(i - 500, r8) / 500.0_r8) * (1._r8 + target_bandwidths(1))
       y = kde_cdf_params(x, p)
       inv = inv_kde_cdf_params(y, p)
-      ! write(*,*) 'Quantile: ', y, 'Exact x: ', x, 'Inverted x: ', inv, 'Error: ', abs(inv - x)
+      write(*,*) 'Quantile: ', y, 'Exact x: ', x, 'Inverted x: ', inv, 'Error: ', abs(inv - x)
       max_diff = max(abs(x-inv), max_diff)
    end do
 
    write(*, *) 'max difference in inversion is ', max_diff
    write(*, *) 'Errors should be small, max around 1E-8'
-   ! The accuracy degrades near the boundary. The slope of the cdf goes to zero on the boundary
-   ! But at least the second derivative is nonzero. So near the boundary it behaves like a
-   ! double root, and the accuracy of the rootfinding degrades.
+   write(*, *) 'The accuracy degrades near the boundary. I believe this is because the'//&
+   ' first and second derivatives go to 0 at the boundary, so it is a third-order root'//&
+   ' and the accuracy of the rootfinding method degrades.'
 
    call deallocate_distribution_params(p)
 
@@ -716,20 +712,23 @@ subroutine test_kde
       ensemble, 0._r8, 1._r8, obs_dist_types%uninformative, p)
 
    max_diff = -1.0_r8
-   do i = 0, 1000
+   do i = 0, 998
       x = (real(i - 500, r8) / 500.0_r8) * (1._r8 + target_bandwidths(1))
       if (x .le. -2._r8) then
          cycle
       else
          y = kde_cdf_params(x, p)
          inv = inv_kde_cdf_params(y, p)
-         ! write(*,*) 'Quantile: ', y, 'Exact x: ', x, 'Inverted x: ', inv, 'Error: ', abs(inv - x)
+         write(*,*) 'Quantile: ', y, 'Exact x: ', x, 'Inverted x: ', inv, 'Error: ', abs(inv - x)
          max_diff = max(abs(x-inv), max_diff)
       end if
    end do
 
    write(*, *) 'max difference in inversion is ', max_diff
-   write(*, *) 'Errors should be small, max below 1E-8'
+   write(*, *) 'Errors should be small, max below 2E-8'
+   write(*, *) 'The accuracy degrades near the upper boundary. I believe this is because the'//&
+   ' first and second derivatives go to 0 at the upper boundary, so it is a third-order root'//&
+   ' and the accuracy of the rootfinding method degrades.'
 
    call deallocate_distribution_params(p)
 
@@ -741,20 +740,23 @@ subroutine test_kde
       ensemble, 0._r8, 1._r8, obs_dist_types%uninformative, p)
 
    max_diff = -1.0_r8
-   do i = 0, 1000
+   do i = 2, 1000
       x = ((real(i, r8) - 500.0_r8) / 500.0_r8) * (1._r8 + target_bandwidths(1))
       if (x .ge. 2._r8) then
          cycle
       else
          y = kde_cdf_params(x, p)
          inv = inv_kde_cdf_params(y, p)
-         ! write(*,*) 'Quantile: ', y, 'Exact x: ', x, 'Inverted x: ', inv, 'Error: ', abs(inv - x)
+         write(*,*) 'Quantile: ', y, 'Exact x: ', x, 'Inverted x: ', inv, 'Error: ', abs(inv - x)
          max_diff = max(abs(x-inv), max_diff)
       end if
    end do
 
    write(*, *) 'max difference in inversion is ', max_diff
-   write(*, *) 'Errors should be small, max below 1E-8'
+   write(*, *) 'Errors should be small, max below 2E-8'
+   write(*, *) 'The accuracy degrades near the lower boundary. I believe this is because the'//&
+   ' first and second derivatives go to 0 at the lower boundary, so it is a third-order root'//&
+   ' and the accuracy of the rootfinding method degrades.'
 
    call deallocate_distribution_params(p)
 
@@ -778,7 +780,7 @@ subroutine test_kde
    end do
 
    write(*, *) 'max difference in inversion is ', max_diff
-   write(*, *) 'Errors should be small, max below 1E-8'
+   write(*, *) 'Errors should be small, max below 2E-8'
 
    call deallocate_distribution_params(p)
 
@@ -803,4 +805,4 @@ end subroutine test_kde
 
 !------------------------------------------------------------------------
 
-end module kde_distribution_mod
+end module kde_biweight_mod
