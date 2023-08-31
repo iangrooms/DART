@@ -14,20 +14,22 @@ use distribution_params_mod, only : distribution_params_type, deallocate_distrib
 
 use rootfinding_mod,         only : inv_cdf
 
+use normal_distribution_mod, only : normal_cdf
+
 implicit none
 private
 
 public :: kde_cdf, kde_cdf_params, inv_kde_cdf, inv_kde_cdf_params,     &
-          test_kde, obs_dist_types, likelihood_function
+          test_kde, obs_dist_types, likelihood_function, pack_kde_params
 
 type available_obs_dist_types
    integer  :: uninformative, normal, binomial, gamma, &
-               inv_gamma, lognormal
+               inv_gamma, lognormal, truncated_normal
 end type
 
 type(available_obs_dist_types), parameter :: obs_dist_types = &
 available_obs_dist_types(uninformative=999, normal=998, binomial=997, &
-   gamma=996, inv_gamma=995, lognormal=994)
+   gamma=996, inv_gamma=995, lognormal=994, truncated_normal=993)
 character(len=512)          :: errstring
 character(len=*), parameter :: source = 'kde_distribution_mod.f90'
 
@@ -35,12 +37,15 @@ contains
 
 !---------------------------------------------------------------------------
 
-function likelihood_function(x, y, obs_param, obs_dist_type) result(l)
+function likelihood_function(x, y, obs_param, obs_dist_type, &
+        bounded_above, bounded_below, upper_bound, lower_bound) result(l)
    real(r8)             :: l  ! likelihood value
    real(r8), intent(in) :: x  ! state value
    real(r8), intent(in) :: y  ! obs value
    real(r8), intent(in) :: obs_param  ! meaning depends on obs_dist_type
    integer,  intent(in) :: obs_dist_type ! obs distribution type
+   logical, optional, intent(in)  :: bounded_above, bounded_below
+   real(r8), optional, intent(in) :: upper_bound, lower_bound
 
    ! Evaluates the likelihood pdf(y | x) for various kinds of observation
    ! distributions. The value returned is not equal to the observation
@@ -49,6 +54,8 @@ function likelihood_function(x, y, obs_param, obs_dist_type) result(l)
 
    real(r8) :: gamma_shape, gamma_scale
    real(r8) :: inv_gamma_shape, inv_gamma_scale
+   real(r8) :: cdf(2)
+   logical  :: bounded_above_val, bounded_below_val
 
    l = 1._r8 ! Initialize
 
@@ -137,6 +144,38 @@ function likelihood_function(x, y, obs_param, obs_dist_type) result(l)
          else
             l = exp( -0.5_r8 * (x - log(y))**2 / obs_param )
          end if
+      case (obs_dist_types%truncated_normal)
+      ! Code based on the version in assim_tools_mod.f90
+      ! This implicitly assumes that the bounds on the y distribution are the same
+      ! as the bounds on x, which makes sense in observation space. The factor of
+      ! sigma * sqrt(2 * pi) is ignored.
+         ! A zero observation error variance is a degenerate case
+         if(obs_param <= 0.0_r8) then
+            if(x == y) then
+               l = 1.0_r8
+            else
+               l = 0.0_r8
+            endif
+            return
+         endif
+
+         cdf = [0._r8, 1._r8]
+         if (present(bounded_above)) then
+            bounded_above_val = bounded_above
+         else
+            bounded_above_val = .false.
+         end if
+
+         if (present(bounded_below)) then
+            bounded_below_val = bounded_below
+         else
+            bounded_below_val = .false.
+         end if
+
+         if (bounded_below_val) cdf(1) = normal_cdf(lower_bound, x, sqrt(obs_param))
+         if (bounded_above_val) cdf(2) = normal_cdf(upper_bound, x, sqrt(obs_param))
+
+         l = exp( -0.5_r8 * (x - y)**2 / obs_param ) / (cdf(2) - cdf(1))
       case DEFAULT
          write(errstring, *) 'likelihood called with unrecognized obs_dist_type ', obs_dist_type
          call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
@@ -279,6 +318,7 @@ function integrate_pdf(x, p) result(q)
                                     128._r8/225._r8, &
                                     (322._r8 + 13._r8 * sqrt(70._r8)) / 900._r8, &
                                     (322._r8 - 13._r8 * sqrt(70._r8)) / 900._r8] ! GQ weights
+   real(r8) :: l ! value of the likelihood function
    integer  :: i, k
 
    ! Unpack obs info from param struct
@@ -320,8 +360,14 @@ function integrate_pdf(x, p) result(q)
       right = min(x, edges(i+1))
       do k=1,5
          xi = 0.5_r8 * ((right - left) * chi(k) + left + right)
-         q  = q + 0.5_r8 * (right - left) * w(k) * kde_pdf(xi, p) * &
-              likelihood_function(xi, y, obs_param, obs_dist_type)
+         if (obs_dist_type .eq. obs_dist_types%truncated_normal) then
+            l = likelihood_function(xi, y, obs_param, obs_dist_type, &
+               bounded_above=p%bounded_above, bounded_below=p%bounded_below, &
+               upper_bound=p%upper_bound, lower_bound=p%lower_bound)
+         else
+            l = likelihood_function(xi, y, obs_param, obs_dist_type)
+         end if
+         q  = q + 0.5_r8 * (right - left) * w(k) * kde_pdf(xi, p) * l
       end do
    end do
    ! Note that it is possible to have maxval(edges) < x < upper_bound,
@@ -670,6 +716,30 @@ subroutine test_kde
    write(*, *) '----------------------------'
    write(*, *) 'Lognormal obs distribution test'
    write(*, *) 'abs difference in likelihood is ', abs(0.6065306597126334_r8 - like)
+   write(*, *) 'abs difference should be less than 1e-15'
+
+   ! Test truncated-normal obs distribution
+   y = 1._r8
+   x = 2._r8
+   obs_param = 4._r8
+   obs_dist_type = obs_dist_types%truncated_normal
+   like = likelihood_function(x, y, obs_param, obs_dist_type, &
+         bounded_above=.true.,bounded_below=.true.,upper_bound=4._r8,lower_bound=0._r8)
+   write(*, *) '----------------------------'
+   write(*, *) 'Truncated-normal obs distribution test, doubly-bounded'
+   write(*, *) 'abs difference in likelihood is ', abs(1.292676850528392_r8 - like)
+   write(*, *) 'abs difference should be less than 1e-15'
+   like = likelihood_function(x, y, obs_param, obs_dist_type, &
+         bounded_above=.false.,bounded_below=.true.,upper_bound=4._r8,lower_bound=0._r8)
+   write(*, *) '----------------------------'
+   write(*, *) 'Truncated-normal obs distribution test, bounded below'
+   write(*, *) 'abs difference in likelihood is ', abs(1.048912359301403_r8 - like)
+   write(*, *) 'abs difference should be less than 1e-15'
+   like = likelihood_function(x, y, obs_param, obs_dist_type, &
+         bounded_above=.true.,bounded_below=.false.,upper_bound=4._r8,lower_bound=0._r8)
+   write(*, *) '----------------------------'
+   write(*, *) 'Truncated-normal obs distribution test, bounded above'
+   write(*, *) 'abs difference in likelihood is ', abs(1.048912359301403_r8 - like)
    write(*, *) 'abs difference should be less than 1e-15'
 
    ! Test bandwidth selection

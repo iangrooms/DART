@@ -1085,8 +1085,11 @@ else
       ! of the likelihood function in kde_distribution_mod.f90. Different types
       ! of observations have different interpretations for `obs_var'.
       if (.not. present(obs_dist_type)) then
-         call error_handler(E_ERR,'obs_increment', &
-                 'For kde filter, must specify obs_dist_type', source)
+!          call error_handler(E_ERR,'obs_increment', &
+!                  'For kde filter, must specify obs_dist_type', source)
+         call obs_increment_kde(ens, ens_size, obs, obs_var, &
+            obs_dist_types%truncated_normal, bounded_below, &
+            bounded_above, lower_bound, upper_bound, obs_inc)
       else
          call obs_increment_kde(ens, ens_size, obs, obs_var, obs_dist_type, &
             bounded_below, bounded_above, lower_bound, upper_bound, obs_inc)
@@ -1238,12 +1241,18 @@ subroutine obs_increment_kde(ens, ens_size, y, obs_param, obs_dist_type, &
 
    ! Get mixture component probabilities for the posterior
    if (bounded_below) then
-      p_lower_post = p_lower_prior * likelihood_function(lower_bound, y, obs_param, obs_dist_type)
+      !p_lower_post = p_lower_prior * likelihood_function(lower_bound, y, obs_param, obs_dist_type)
+      ! Hack to use truncated normal obs dist:
+      p_lower_post = p_lower_prior * likelihood_function(lower_bound, y, obs_param, obs_dist_types%truncated_normal, &
+                   bounded_above=bounded_above, bounded_below=bounded_below, upper_bound=upper_bound, lower_bound=lower_bound)
    else
       p_lower_post  = 0._r8
    end if
    if (bounded_above) then
-      p_upper_post = p_upper_prior * likelihood_function(upper_bound, y, obs_param, obs_dist_type)
+      !p_upper_post = p_upper_prior * likelihood_function(upper_bound, y, obs_param, obs_dist_type)
+      ! Hack to use truncated normal obs dist:
+      p_upper_post = p_upper_prior * likelihood_function(upper_bound, y, obs_param, obs_dist_types%truncated_normal, &
+                   bounded_above=bounded_above, bounded_below=bounded_below, upper_bound=upper_bound, lower_bound=lower_bound)
    else
       p_upper_post  = 0._r8
    end if
@@ -1251,7 +1260,10 @@ subroutine obs_increment_kde(ens, ens_size, y, obs_param, obs_dist_type, &
    j = 0
    do i=1,ens_size
       if (is_interior(i)) then
-         p_int_post = p_int_post + likelihood_function(ens(i), y, obs_param, obs_dist_type)
+         !p_int_post = p_int_post + likelihood_function(ens(i), y, obs_param, obs_dist_type)
+         ! Hack to use truncated normal obs dist:
+         p_int_post = p_int_post + likelihood_function(ens(i), y, obs_param, obs_dist_types%truncated_normal, &
+                 bounded_above=bounded_above, bounded_below=bounded_below, upper_bound=upper_bound, lower_bound=lower_bound)
          j = j + 1
          ens_interior(j) = ens(i)
       end if
@@ -1310,8 +1322,11 @@ subroutine obs_increment_kde(ens, ens_size, y, obs_param, obs_dist_type, &
       else ! posterior value in the interior
          ! Rescale q to be between 0 and 1 before inverting interior cdf
          q = (q - p_lower_post) / p_int_post
+         !obs_inc(i) = inv_kde_cdf(q, ens_interior(1:ens_size_interior), ens_size_interior, &
+         !   bounded_below, bounded_above, lower_bound, upper_bound, y, obs_param, obs_dist_type)
+         ! Hack to use truncated normal obs dist:
          obs_inc(i) = inv_kde_cdf(q, ens_interior(1:ens_size_interior), ens_size_interior, &
-            bounded_below, bounded_above, lower_bound, upper_bound, y, obs_param, obs_dist_type)
+            bounded_below, bounded_above, lower_bound, upper_bound, y, obs_param, obs_dist_types%truncated_normal)
          obs_inc(i) = obs_inc(i) - ens(i)
       end if
    end do
@@ -2741,6 +2756,8 @@ select case (filter_kind)
    msgstring = 'Gamma Filter'
  case (101)
    msgstring = 'Bounded Rank Histogram Filter'
+ case (102)
+   msgstring = 'KDE+Quadrature Filter'
  case default
    call error_handler(E_ERR, 'assim_tools_init:', 'illegal filter_kind value, valid values are 1-8', &
                       source)
