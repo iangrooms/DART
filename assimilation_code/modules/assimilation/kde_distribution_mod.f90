@@ -1,16 +1,13 @@
-! DART software - Copyright UCAR. This open source software is provided
-! by UCAR, "as is", without charge, subject to all terms of use at
-! http://www.image.ucar.edu/DAReS/DART/DART_download
-
 module kde_distribution_mod
 
-use types_mod,               only : r8
+use types_mod,               only : r8, missing_r8
 
 use utilities_mod,           only : E_ERR, E_MSG, error_handler
 
 use sort_mod,                only : sort
 
-use distribution_params_mod, only : distribution_params_type, deallocate_distribution_params
+use distribution_params_mod, only : distribution_params_type, deallocate_distribution_params, &
+                                    KDE_DISTRIBUTION
 
 use rootfinding_mod,         only : inv_cdf
 
@@ -19,8 +16,9 @@ use normal_distribution_mod, only : normal_cdf
 implicit none
 private
 
-public :: kde_cdf, kde_cdf_params, inv_kde_cdf, inv_kde_cdf_params,     &
-          test_kde, obs_dist_types, likelihood_function, pack_kde_params
+public :: kde_cdf, kde_cdf_params, inv_kde_cdf, inv_kde_cdf_params,       &
+          test_kde, obs_dist_types, likelihood_function, pack_kde_params, &
+          separate_ensemble
 
 type available_obs_dist_types
    integer  :: uninformative, normal, binomial, gamma, &
@@ -65,8 +63,8 @@ function likelihood_function(x, y, obs_param, obs_dist_type, &
          l = 1._r8
       case (obs_dist_types%normal)
          ! For a normal obs distribution, like_param is the obs error variance
-         if (obs_param .le. 0._r8) then
-            write(errstring, *) 'obs error sd .le. 0', obs_param
+         if (obs_param <= 0._r8) then
+            write(errstring, *) 'obs error sd <= 0', obs_param
             call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
          else
             l = exp( -0.5_r8 * (x - y)**2 / obs_param )
@@ -74,13 +72,13 @@ function likelihood_function(x, y, obs_param, obs_dist_type, &
       case (obs_dist_types%binomial)
          ! For a binomial obs distribution 0<=x<=1 is the probability of
          ! observing y successes of obs_param total trials
-         if (y .lt. 0._r8) then
+         if (y < 0._r8) then
             write(errstring, *) 'y value is negative with a binomial obs model ', y
             call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
-         elseif (y .gt. obs_param) then
+         elseif (y > obs_param) then
             write(errstring, *) 'successes greater than total trials with a binomial obs model ', y, obs_param
             call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
-         elseif ((x .lt. 0._r8) .or. (x .gt. 1._r8)) then
+         elseif ((x < 0._r8) .or. (x > 1._r8)) then
             write(errstring, *) 'x outside [0,1] with a binomial obs model ', x
             call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
          else
@@ -91,13 +89,13 @@ function likelihood_function(x, y, obs_param, obs_dist_type, &
          ! the obs error sd is sqrt(obs_param) times  the true value. If the error sd is p% of x,
          ! set obs_param = (p/100._r8)**2.
          ! For a gamma obs distribution, the likelihood is inverse gamma.
-         if (x .lt. 0._r8) then
+         if (x < 0._r8) then
             write(errstring, *) 'x value is negative with a gamma obs model ', x
             call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
-         elseif (y .le. 0._r8) then
+         elseif (y <= 0._r8) then
             write(errstring, *) 'y value is non-positive with a gamma obs model ', y
             call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
-         elseif (obs_param .le. 0._r8) then
+         elseif (obs_param <= 0._r8) then
             write(errstring, *) 'obs variance is non-positive with a gamma obs model ', obs_param
             call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
          else
@@ -114,13 +112,13 @@ function likelihood_function(x, y, obs_param, obs_dist_type, &
          ! i.e. the obs error sd is sqrt(obs_param) times  the true value. If the error sd is p% of x,
          ! set obs_param = (p/100._r8)**2.
          ! For an inverse gamma obs distribution, the likelihood is gamma.
-         if (x .lt. 0._r8) then
+         if (x < 0._r8) then
             write(errstring, *) 'x value is negative with an inverse gamma obs model ', x
             call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
-         elseif (y .le. 0._r8) then
+         elseif (y <= 0._r8) then
             write(errstring, *) 'y value is non-positive with an inverse gamma obs model ', y
             call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
-         elseif (obs_param .le. 0._r8) then
+         elseif (obs_param <= 0._r8) then
             write(errstring, *) 'obs variance is non-positive with an inverse gamma obs model ', obs_param
             call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
          else
@@ -135,20 +133,20 @@ function likelihood_function(x, y, obs_param, obs_dist_type, &
       case (obs_dist_types%lognormal)
          ! For a lognormal obs distribution, ln(y) is normal with mean x and variance obs_param.
          ! The likelihood is normal.
-         if (y .le. 0._r8) then
+         if (y <= 0._r8) then
             write(errstring, *) 'y value is non-positive with a lognormal obs model', y
             call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
-         elseif (obs_param .le. 0._r8) then
-            write(errstring, *) 'obs error sd .le. 0', obs_param
+         elseif (obs_param <= 0._r8) then
+            write(errstring, *) 'obs error sd <= 0', obs_param
             call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
          else
             l = exp( -0.5_r8 * (x - log(y))**2 / obs_param )
          end if
       case (obs_dist_types%truncated_normal)
-      ! Code based on the version in assim_tools_mod.f90
-      ! This implicitly assumes that the bounds on the y distribution are the same
-      ! as the bounds on x, which makes sense in observation space. The factor of
-      ! sigma * sqrt(2 * pi) is ignored.
+         ! Code based on the version in assim_tools_mod.f90
+         ! This implicitly assumes that the bounds on the y distribution are the same
+         ! as the bounds on x, which makes sense in observation space. The factor of
+         ! sigma * sqrt(2 * pi) is ignored.
          ! A zero observation error variance is a degenerate case
          if(obs_param <= 0.0_r8) then
             if(x == y) then
@@ -178,7 +176,7 @@ function likelihood_function(x, y, obs_param, obs_dist_type, &
          l = exp( -0.5_r8 * (x - y)**2 / obs_param ) / (cdf(2) - cdf(1))
       case DEFAULT
          write(errstring, *) 'likelihood called with unrecognized obs_dist_type ', obs_dist_type
-         call error_handler(E_MSG, 'kde_distribution_mod:likelihood', errstring, source)
+         call error_handler(E_MSG, 'kde_distribution_mod:likelihood_function', errstring, source)
    end select
 
 end function likelihood_function
@@ -199,9 +197,9 @@ elemental function epanechnikov_cdf(x) ! The fact that this is elemental is not 
    real(r8) :: epanechnikov_cdf
    real(r8), intent(in) :: x
    real(r8), parameter  :: norm_const = 1._r8 / 4._r8
-   if (x .le. -1._r8) then
+   if (x <= -1._r8) then
       epanechnikov_cdf = 0._r8
-   elseif (x .le. 1._r8) then
+   elseif (x <= 1._r8) then
       epanechnikov_cdf = min(1._r8, max(0._r8, norm_const * (2._r8 + 3._r8 * x - x**3)))
    else
       epanechnikov_cdf = 1._r8
@@ -240,6 +238,8 @@ function kde_pdf(x, p)
    real(r8) :: u_upper, lx_upper, mx_upper
 
    kde_pdf = 0._r8 ! Initialize
+   if (p%bounded_below .and. (x <= p%lower_bound)) return
+   if (p%bounded_above .and. (x >= p%upper_bound)) return
    do i=1, p%ens_size ! Reduction loop - parallelizable
       u_lower = 0._r8; lx_lower = 1._r8 ; mx_lower = 0._r8
       u_upper = 0._r8; lx_upper = 1._r8 ; mx_upper = 0._r8
@@ -251,12 +251,13 @@ function kde_pdf(x, p)
          u_upper = min( 1._r8, max( 0._r8, (p%upper_bound - x) / p%more_params(i) ) )
          call boundary_correction(u_upper, lx_upper, mx_upper)
       end if
+      u_lower = (x - p%ens(i)) / p%more_params(i) ! Not u_lower any more, just (x-x_i)/h_i
       kde_pdf = kde_pdf + (1._r8 / p%more_params(i)) * &
                           (lx_lower + mx_lower * u_lower) * &
-                          (lx_upper + mx_upper * u_upper) * &
-                          epanechnikov_kernel( (x - p%ens(i)) / p%more_params(i) )
+                          (lx_upper - mx_upper * u_lower) * &
+                          epanechnikov_kernel( u_lower )
    end do
-   kde_pdf = kde_pdf / (p%ens_size * p%more_params(p%ens_size + 1)) ! p%more_params(ens_size + 1) normalizes the pdf
+   kde_pdf = max(0._r8, kde_pdf) / (p%ens_size * p%more_params(p%ens_size + 1)) ! p%more_params(ens_size + 1) normalizes the pdf
 
 end function kde_pdf
 
@@ -267,24 +268,93 @@ subroutine get_kde_bandwidths(ens_size, ens, bandwidths)
    real(r8),        intent(in)   :: ens(ens_size)
    real(r8),        intent(out)  :: bandwidths(ens_size)
 
-   real(r8)                      :: ens_mean, ens_sd, h0, g
+   real(r8)                      :: ens_mean, ens_sd, h0, g, d_max
    real(r8), dimension(ens_size) :: f_tilde, d, lambda
-   integer                       :: i, k
+   integer                       :: i, j, k
 
+
+   d(:) = abs( ens(:) - ens(1) )
+   d_max = maxval(d(:))
+   if (d_max <= 0._r8) then
+      errstring = 'Bandwidth = 0 '
+      call error_handler(E_ERR, 'get_kde_bandwidths', errstring, source)
+   end if
    ens_mean = sum(ens) / ens_size
    ens_sd   = sqrt( sum( (ens - ens_mean)**2 ) / (ens_size - 1._r8) )
    h0 = 2._r8 * ens_sd / (ens_size**0.2_r8) ! This would be the kernel width if the widths were not adaptive.
                                             ! It would be better to use min(sd, iqr/1.34) but don't want to compute iqr
    k = floor( sqrt( real(ens_size) ) ) ! distance to kth nearest neighbor used to set bandwidth
    do i=1,ens_size
-      d(:) = sort( abs( ens(:) - ens(i) ) ) ! Sorted neighbor distances
-      f_tilde(i) = 0.5_r8 * real(k, r8) / (real(ens_size, r8) * d(k+1)) ! Initial density estimate
+      d(:) = sort( abs( ens(:) - ens(i) ) )
+      d_max = maxval(d(:))
+      where (d < 1.e-3_r8 * d_max) ! set small distances to zero
+         d = 0._r8
+      end where
+      j = 1
+      do while ((d(k+j) <= 0._r8) .and. (k+j < ens_size))
+         j = j + 1
+      end do
+      f_tilde(i) = 0.5_r8 * real(k+j-1, r8) / (real(ens_size, r8) * d(k+j)) ! Initial density estimate
    end do
+   f_tilde(:) = f_tilde(:) / maxval(f_tilde(:)) ! Avoids overflow in the next line
    g = product( f_tilde )**( 1._r8 / real(ens_size, r8) )
    lambda(:) = sqrt( g / f_tilde(:) )
    bandwidths(:) = h0 * lambda(:)
+   if (maxval(bandwidths(:)) <= 0._r8) then
+      write(*,*) 'Bandwidth breakdown'
+      write(*,*) h0, g, lambda(:), f_tilde(:), ens(:)
+   end if
 
 end subroutine get_kde_bandwidths
+
+!---------------------------------------------------------------------------
+
+function gq5(left, right, p) result(q)
+   real(r8)                                   :: q
+   real(r8),                       intent(in) :: left, right
+   type(distribution_params_type), intent(in) :: p
+
+   ! Uses 5-point Gauss quadrature to approximate \int_left^right l(s; y) p(s) ds
+   !  where p(x) is the prior pdf and l(x; y) is the likelihood. This only works
+   !  correctly if left >= lower_bound and right <= upper_bound. The result is
+   ! **Not Normalized**.
+
+   real(r8) :: y
+   real(r8) :: obs_param ! See likelihood function for interpretation
+   integer  :: obs_dist_type  ! See likelihood function for interpretation
+   real(r8) :: xi ! quadrature point
+   real(r8), save :: chi(5) = [-sqrt(5._r8 + 2._r8 * sqrt(10._r8 / 7._r8)) / 3._r8, &
+                               -sqrt(5._r8 - 2._r8 * sqrt(10._r8 / 7._r8)) / 3._r8, &
+                                0._r8, &
+                                sqrt(5._r8 - 2._r8 * sqrt(10._r8 / 7._r8)) / 3._r8, &
+                                sqrt(5._r8 + 2._r8 * sqrt(10._r8 / 7._r8)) / 3._r8] ! Gauss quadrature points
+   real(r8), save :: w(5)   = [(322._r8 - 13._r8 * sqrt(70._r8)) / 900._r8, &
+                               (322._r8 + 13._r8 * sqrt(70._r8)) / 900._r8, &
+                               128._r8/225._r8, &
+                               (322._r8 + 13._r8 * sqrt(70._r8)) / 900._r8, &
+                               (322._r8 - 13._r8 * sqrt(70._r8)) / 900._r8] ! GQ weights
+   real(r8) :: l ! value of the likelihood function
+   integer  :: k
+
+   ! Unpack obs info from param struct
+   y         = p%more_params(p%ens_size + 2)
+   obs_param = p%more_params(p%ens_size + 3)
+   obs_dist_type  = nint(p%more_params(p%ens_size + 4))
+
+   q = 0._r8
+   do k=1,5
+      xi = 0.5_r8 * ((right - left) * chi(k) + left + right)
+      if (obs_dist_type .eq. obs_dist_types%truncated_normal) then
+         l = likelihood_function(xi, y, obs_param, obs_dist_type, &
+            bounded_above=p%bounded_above, bounded_below=p%bounded_below, &
+            upper_bound=p%upper_bound, lower_bound=p%lower_bound)
+      else
+         l = likelihood_function(xi, y, obs_param, obs_dist_type)
+      end if
+      q  = q + 0.5_r8 * (right - left) * w(k) * kde_pdf(xi, p) * l
+   end do
+
+end function gq5
 
 !---------------------------------------------------------------------------
 
@@ -305,70 +375,42 @@ function integrate_pdf(x, p) result(q)
    real(r8) :: obs_param ! See likelihood function for interpretation
    integer  :: obs_dist_type  ! See likelihood function for interpretation
    real(r8) :: edges(2*p%ens_size)
-   real(r8) :: left, right, xi ! edges of current sub-interval, quadrature point
-   ! real(r8), parameter :: chi(3) = [-sqrt(3._r8/5._r8), 0._r8, sqrt(3._r8/5._r8)] ! Gauss quadrature points
-   ! real(r8), parameter :: w(3)   = [     5._r8/9._r8, 8._r8/9._r8, 5._r8/9._r8 ] ! GQ weights
-   real(r8), parameter :: chi(5) = [-sqrt(5._r8 + 2._r8 * sqrt(10._r8 / 7._r8)) / 3._r8, &
-                                    -sqrt(5._r8 - 2._r8 * sqrt(10._r8 / 7._r8)) / 3._r8, &
-                                    0._r8, &
-                                     sqrt(5._r8 - 2._r8 * sqrt(10._r8 / 7._r8)) / 3._r8, &
-                                     sqrt(5._r8 + 2._r8 * sqrt(10._r8 / 7._r8)) / 3._r8] ! Gauss quadrature points
-   real(r8), parameter :: w(5)   = [(322._r8 - 13._r8 * sqrt(70._r8)) / 900._r8, &
-                                    (322._r8 + 13._r8 * sqrt(70._r8)) / 900._r8, &
-                                    128._r8/225._r8, &
-                                    (322._r8 + 13._r8 * sqrt(70._r8)) / 900._r8, &
-                                    (322._r8 - 13._r8 * sqrt(70._r8)) / 900._r8] ! GQ weights
-   real(r8) :: l ! value of the likelihood function
-   integer  :: i, k
+   real(r8) :: left, right ! edges of current sub-interval, quadrature point
+   integer  :: i
 
    ! Unpack obs info from param struct
    y         = p%more_params(p%ens_size + 2)
    obs_param = p%more_params(p%ens_size + 3)
    obs_dist_type  = nint(p%more_params(p%ens_size + 4))
 
-   edges(1:p%ens_size)                = p%ens(:) - p%more_params(1:p%ens_size)
-   edges(p%ens_size + 1:2*p%ens_size) = p%ens(:) + p%more_params(1:p%ens_size)
+   edges(1:p%ens_size)                = p%ens(1:p%ens_size) - p%more_params(1:p%ens_size)
+   edges(p%ens_size + 1:2*p%ens_size) = p%ens(1:p%ens_size) + p%more_params(1:p%ens_size)
    edges(:) = sort(edges(:)) ! If bandwidths were constant we would not need to sort
 
    ! If x is outside the support of the pdf then we can skip the quadrature.
    left = edges(1)
    if (p%bounded_below) left = max(left, p%lower_bound)
-   if (x .le. left) then
+   if (x <= left) then
       q = 0._r8
       return
    end if
 
-   ! Important to use x .gt. upper_bound here because I use
+   ! Important to use x > upper_bound here because I use
    ! x = upper_bound to compute the normalization constant.
-   if ((p%bounded_above) .and. (x .gt. p%upper_bound)) then
+   if ((p%bounded_above) .and. (x > p%upper_bound)) then
       q = 1._r8
       return
    end if
 
    ! If we haven't returned yet, then there is at least one subinterval.
-   q = 0._r8
    i = 1
    right = min(x, edges(2)) ! left was computed above
-   do k=1,5
-      xi = 0.5_r8 * ((right - left) * chi(k) + left + right)
-      q  = q + 0.5_r8 * (right - left) * w(k) * kde_pdf(xi, p) * &
-           likelihood_function(xi, y, obs_param, obs_dist_type)
-   end do
-   do while ((x .gt. right) .and. (i+1 .lt. 2*p%ens_size))
+   q = gq5(left, right, p)
+   do while ((x > right) .and. (i+1 < 2*p%ens_size))
       i     = i + 1
       left  = right
       right = min(x, edges(i+1))
-      do k=1,5
-         xi = 0.5_r8 * ((right - left) * chi(k) + left + right)
-         if (obs_dist_type .eq. obs_dist_types%truncated_normal) then
-            l = likelihood_function(xi, y, obs_param, obs_dist_type, &
-               bounded_above=p%bounded_above, bounded_below=p%bounded_below, &
-               upper_bound=p%upper_bound, lower_bound=p%lower_bound)
-         else
-            l = likelihood_function(xi, y, obs_param, obs_dist_type)
-         end if
-         q  = q + 0.5_r8 * (right - left) * w(k) * kde_pdf(xi, p) * l
-      end do
+      q     = q + gq5(left, right, p)
    end do
    ! Note that it is possible to have maxval(edges) < x < upper_bound,
    ! but that last sub-interval from maxval(edges) to x has zero integral,
@@ -390,21 +432,24 @@ subroutine pack_kde_params(ens_size, bounded_below, bounded_above, lower_bound, 
    type(distribution_params_type), intent(out) :: p
 
    real(r8) :: bandwidths(ens_size)
-   real(r8) :: edge
-   logical  :: needs_normalization
+   real(r8) :: edge, edges(2*ens_size + 2)
+   integer  :: i
 
    ! Set the fixed storage parameters in the distribution_params_type
    p%ens_size = ens_size
+   p%distribution_type = KDE_DISTRIBUTION
 
    ! Allocate space needed for the parameters
-   allocate(p%ens(ens_size))
-   allocate(p%more_params(ens_size+4))
+   allocate(p%ens(1:ens_size), source=0._r8)
+   allocate(p%more_params(1:5*ens_size + 8), source=0._r8)
 
    ! p%more_params(1:ens_size) are the kernel bandwidths
    ! p%more_params(ens_size + 1) is the normalization constant for the pdf
    ! p%more_params(ens_size + 2) is the observation value y; not used for prior
    ! p%more_params(ens_size + 3) is the observation parameter (see likelihood for details); not used for prior
    ! p%more_params(ens_size + 4) is the observation error distribution type. For prior set to uninformative
+   ! p%more_params(ens_size + 5:3*ens_size + 6) are the edges.
+   ! p%more_params(3*ens_size+7:5*ens_size+8) are the cdf evaluated at the edges.
 
    ! Save the ensemble values, sorted now so that they don't have to be re-sorted for the first guess
    p%ens(:) = sort(ens(:))
@@ -414,10 +459,30 @@ subroutine pack_kde_params(ens_size, bounded_below, bounded_above, lower_bound, 
    call get_kde_bandwidths(ens_size, p%ens, bandwidths)
    p%more_params(1:ens_size) = bandwidths(:)
 
-   ! If the ensemble is sufficiently far from the boundary, then
-   ! we can use the unbounded code, which is cheaper.
+   ! Pack obs information
+   p%more_params(ens_size + 2) = y
+   p%more_params(ens_size + 3) = obs_param
+   p%more_params(ens_size + 4) = real(obs_dist_type, r8) ! This is not ideal because it involves a type conversion from int to real
+
+  ! Get the edges of the subintervals on which the pdf is smooth
+   edges(1:ens_size)            = p%ens(:) - bandwidths(:)
+   edges(ens_size+1:2*ens_size) = p%ens(:) + bandwidths(:)
+   if (bounded_below) then
+      edges(2*ens_size+1) = lower_bound
+   else
+      edges(2*ens_size+1) = minval(edges(1:ens_size))
+   end if
+   if (bounded_above) then
+      edges(2*ens_size+2) = upper_bound
+   else
+      edges(2*ens_size+2) = maxval(edges(ens_size+1:2*ens_size))
+   end if
+   edges(:) = sort(edges(:))
+   p%more_params(ens_size+5:3*ens_size+6) = edges(:)
+
+   ! If the ensemble is sufficiently far from the boundary, that we can use the unbounded code, which is cheaper.
    edge = minval(p%ens(:) - 2*bandwidths(:))
-   if (bounded_below .and. (edge .gt. lower_bound)) then
+   if (bounded_below .and. (edge > lower_bound)) then
       p%bounded_below = .false.
       p%lower_bound = minval(p%ens(:) - bandwidths(:))
    else
@@ -425,8 +490,9 @@ subroutine pack_kde_params(ens_size, bounded_below, bounded_above, lower_bound, 
       p%lower_bound = lower_bound
    end if
 
+   ! If the ensemble is sufficiently far from the boundary, that we can use the unbounded code, which is cheaper.
    edge = maxval(p%ens(:) + 2*bandwidths(:))
-   if (bounded_above .and. (edge .lt. upper_bound)) then
+   if (bounded_above .and. (edge < upper_bound)) then
       p%bounded_above = .false.
       p%upper_bound = maxval(p%ens(:) + bandwidths(:))
    else
@@ -434,26 +500,21 @@ subroutine pack_kde_params(ens_size, bounded_below, bounded_above, lower_bound, 
       p%upper_bound = upper_bound
    end if
 
-   ! Pack obs information
-   p%more_params(ens_size + 2) = y
-   p%more_params(ens_size + 3) = obs_param
-   p%more_params(ens_size + 4) = real(obs_dist_type, r8) ! This is not ideal because it involves a type conversion from int to real
-
-   ! Get the normalization constant
-   p%more_params(ens_size + 1) = 1._r8 ! This value is used below
-   needs_normalization = .false. .or. p%bounded_below
-   needs_normalization = needs_normalization .or. p%bounded_above
-   needs_normalization = needs_normalization .or. &
-                         .not.(obs_dist_type .eq. obs_dist_types%uninformative)
-   if (needs_normalization) then
-      ! quadrature-based, so need to normalize. The call below uses
-      ! quadrature to integrate the pdf from -infty to the upper end
-      ! of the support using a normalization constant of 1, then
-      ! packs the result into p%more_params(ens_size+1)
-      edge = maxval(p%ens(:) + bandwidths(:))
-      if (p%bounded_above) edge = min(edge, p%upper_bound)
-      p%more_params(ens_size + 1) = integrate_pdf(edge, p)
-   end if
+   ! Integrate across all subintervals
+   p%more_params(ens_size+1) = 1._r8 ! Temporary value
+   p%more_params(3*ens_size+7) = 0._r8 ! 0 at left edge
+   do i=2,2*ens_size+2
+      if ((p%bounded_below .and. (edges(i) <= p%lower_bound)) .or. &
+          (edges(i) <= edges(i-1)) .or. &
+          (p%bounded_above .and. (edges(i) > p%upper_bound))) then
+         ! The subinterval [edges(i-1), edges(i)] is empty or outside the bounds
+         p%more_params(3*ens_size+6+i) = p%more_params(3*ens_size+6+i-1) + 0._r8
+      else
+         p%more_params(3*ens_size+6+i) = p%more_params(3*ens_size+6+i-1) + gq5(edges(i-1), edges(i), p)
+      end if
+   end do
+   p%more_params(ens_size+1) = maxval(p%more_params(3*ens_size+7:5*ens_size+8))
+   p%more_params(3*ens_size+7:5*ens_size+8) = p%more_params(3*ens_size+7:5*ens_size+8) / p%more_params(ens_size+1)
 
 end subroutine pack_kde_params
 
@@ -473,11 +534,14 @@ function kde_cdf_params(x, p) result(quantile)
    real(r8) :: bandwidths(p%ens_size)
    real(r8) :: y, obs_param
    integer  :: obs_dist_type
+   real(r8), dimension(2*p%ens_size+2) :: edges, cdfs
 
    bandwidths(:) = p%more_params(1:p%ens_size)
    y             = p%more_params(p%ens_size + 2)
    obs_param     = p%more_params(p%ens_size + 3)
    obs_dist_type = nint(p%more_params(p%ens_size + 4))
+   edges(:)      = p%more_params(  p%ens_size+5:3*p%ens_size+6)
+   cdfs(:)       = p%more_params(3*p%ens_size+7:5*p%ens_size+8)
 
    quantile = 0._r8
    ! If the likelihood is uninformative and the distribution is unbounded, we can evaluate
@@ -489,7 +553,19 @@ function kde_cdf_params(x, p) result(quantile)
          quantile = quantile + epanechnikov_cdf( (x - p%ens(i)) / bandwidths(i) ) / p%ens_size
       end do
    else ! Compute cdf using quadrature
-      quantile  = min(1._r8, max(0._r8, integrate_pdf(x, p)))
+      !quantile  = min(1._r8, max(0._r8, integrate_pdf(x, p)))
+      if (x < edges(1)) then
+         return
+      end if
+      do i=2,2*p%ens_size+2
+         if ((edges(i-1) <= x) .and. (x <= edges(i))) then
+            quantile = min(1._r8, max(0._r8, cdfs(i-1) + gq5(edges(i-1), x, p)))
+            return
+         else
+            cycle
+         end if
+      end do
+      quantile = 1._r8
    end if
 
 end function kde_cdf_params
@@ -511,7 +587,7 @@ function kde_cdf(x, ens, ens_size, bounded_below, bounded_above, &
    ! Returns the cumulative distribution of the kernel density estimate
    ! at the value x.
 
-   type(distribution_params_type) :: p
+   type(distribution_params_type)    :: p
 
    call pack_kde_params(ens_size, bounded_below, bounded_above, lower_bound, upper_bound, &
       ens, y, obs_param, obs_dist_type, p)
@@ -569,59 +645,103 @@ function inv_kde_first_guess_params(quantile, p) result(x)
    ! then finds a pair of ensemble members whose quantiles bracket the
    ! target quantile, then sets the first guess to a convex combination of
    ! these two ensemble members. If the target quantile is outside the
-   ! ensemble, the first guess is the nearest ensemble member. If the
+   ! ensemble, the first guess is a combination of the nearest ensemble
+   ! member and the edge of the support of the pdf. If the
    ! target quantile is 0 or 1, the appropriate bound is returned.
 
-   real(r8) :: q0, q1
    integer  :: i
+   real(r8) :: dq
+   real(r8), dimension(2*p%ens_size+2) :: edges, cdfs
 
-   if (quantile .eq. 0._r8) then
-      edge = minval(p%ens(:) - p%more_params(1:p%ens_size))
+   edges(:)      = p%more_params(  p%ens_size+5:3*p%ens_size+6)
+   cdfs(:)       = p%more_params(3*p%ens_size+7:5*p%ens_size+8)
+
+   if (quantile <= 0._r8) then
+      x = minval(edges(:))
       if (p%bounded_below) then
-         edge = max(edge, p%lower_bound)
+         x = max(x, p%lower_bound)
       end if
-      x = edge
       return
    end if
 
-   if (quantile .eq. 1._r8) then
-      edge = maxval(p%ens(:) + p%more_params(1:p%ens_size))
+   if (quantile >= 1._r8) then
+      x = maxval(edges(:))
       if (p%bounded_above) then
-         edge = min(edge, p%upper_bound)
+         x = min(x, p%upper_bound)
       end if
-      x = edge
       return
    end if
 
-   q0 = kde_cdf_params(p%ens(1), p)
-   if (quantile .le. q0) then
-      ! x = p%ens(1)
-      edge = minval(p%ens(:) - p%more_params(1:p%ens_size))
-      if (p%bounded_below) then
-         edge = max(edge, p%lower_bound)
-      end if
-      x = ((q0 - quantile) * edge + quantile * p%ens(1)) / q0
-      return
-   end if
-   do i=1,p%ens_size-1
-      q1 = kde_cdf_params(p%ens(i+1), p)
-      if (q0 .lt. quantile) then ; if (q1 .ge. quantile) then
-         x = ((q1 - quantile) * p%ens(i) + (quantile - q0) * p%ens(i+1)) / &
-             (q1 - q0)
+   do i=2,2*p%ens_size+2
+      if (quantile <= cdfs(i)) then
+         dq = cdfs(i) - cdfs(i-1)
+         x = (cdfs(i  ) - quantile) * edges(i-1) / dq &
+           + (quantile - cdfs(i-1)) * edges(i  ) / dq
          return
-      end if ; end if
-      q0 = q1
+      end if
    end do
-   ! x = p%ens(p%ens_size)
-   ! If we get this far then quantile > cdf(p%ens(end)) = q0.
-   edge = maxval(p%ens(:) + p%more_params(1:p%ens_size))
-   if (p%bounded_above) then
-      edge = min(edge, p%upper_bound)
-   end if
-   x = ((1._r8 - quantile) * p%ens(p%ens_size) + (quantile - q0) * edge) / &
-       (1._r8 - q0)
 
 end function inv_kde_first_guess_params
+
+!-----------------------------------------------------------------------
+
+subroutine separate_ensemble(ens, ens_size, bounded_below, bounded_above, &
+   lower_bound, upper_bound, ens_interior, ens_size_interior, &
+   q_lower, q_int, q_upper)
+
+   ! Extracts the ensemble members that are not on the boundaries, and
+   ! also returns the fraction of ensemble members on each boundary and in
+   ! the interior.
+
+   integer,   intent(in) :: ens_size
+   real(r8),  intent(in) :: ens(ens_size)
+   logical,   intent(in) :: bounded_below, bounded_above
+   real(r8),  intent(in) :: lower_bound,   upper_bound
+   real(r8), intent(out) :: ens_interior(ens_size)
+   integer,  intent(out) :: ens_size_interior
+   real(r8), intent(out) :: q_lower, q_int, q_upper
+
+   ! local variables
+   integer  :: i, j
+   logical  :: is_interior(ens_size)
+   real(r8), parameter :: eps = 0._r8 !epsilon(1._r8)
+
+   ! Initialize
+   ens_interior(:) = missing_r8
+
+   q_lower = 0._r8
+   q_int   = 0._r8
+   q_upper = 0._r8
+   is_interior(:) = .true.
+   j = 0
+   do i=1,ens_size
+      if (bounded_below) then
+         if (ens(i) <= lower_bound + eps) then
+            q_lower        = q_lower + 1._r8
+            is_interior(i) = .false.
+         end if
+      end if
+      if (bounded_above) then
+         if (ens(i) >= upper_bound - eps) then
+            q_upper        = q_upper + 1._r8
+            is_interior(i) = .false.
+         end if
+      end if
+      if (is_interior(i)) then
+         j = j + 1
+         ens_interior(j) = ens(i)
+      end if
+   end do
+   ens_size_interior = ens_size - nint(q_lower + q_upper)
+   if (j .ne. ens_size_interior) then
+      errstring = 'Total number of interior ensemble members incorrect '
+      call error_handler(E_ERR, 'separate_ensemble', errstring, source)
+   end if
+   q_lower = q_lower / real(ens_size, r8)
+   q_upper = q_upper / real(ens_size, r8)
+   q_int   = 1._r8 - (q_lower + q_upper)
+
+end subroutine separate_ensemble
 
 !-----------------------------------------------------------------------
 
@@ -654,7 +774,7 @@ subroutine test_kde
    obs_param = 1._r8
    obs_dist_type = obs_dist_types%uninformative
    do i = 0, 1000
-      x = ((real(i, r8) - 500.0_r8) / 500.0_r8) * (1._r8 + target_bandwidths(1))
+      x = (real(i, r8) - 500.0_r8) / 500.0_r8
       like = likelihood_function(x, y, obs_param, obs_dist_type)
       max_diff = max(abs(1._r8 - like), max_diff)
    end do
@@ -788,7 +908,7 @@ subroutine test_kde
    max_diff = -1.0_r8
    do i = 0, 1000
       x = (real(i - 500, r8) / 500.0_r8) * (1._r8 + target_bandwidths(1))
-      if (x .le. -2._r8) then
+      if (x <= -2._r8) then
          cycle
       else
          y = kde_cdf_params(x, p)
@@ -813,7 +933,7 @@ subroutine test_kde
    max_diff = -1.0_r8
    do i = 0, 1000
       x = ((real(i, r8) - 500.0_r8) / 500.0_r8) * (1._r8 + target_bandwidths(1))
-      if (x .ge. 2._r8) then
+      if (x >= 2._r8) then
          cycle
       else
          y = kde_cdf_params(x, p)
@@ -837,7 +957,7 @@ subroutine test_kde
    max_diff = -1.0_r8
    do i = 0, 1000
       x = ((real(i, r8) - 500.0_r8) / 500.0_r8) * (1._r8 + target_bandwidths(1))
-      if ((x .le. -2._r8) .or. (x .ge. 2._r8)) then
+      if ((x <= -2._r8) .or. (x >= 2._r8)) then
          cycle
       else
          y = kde_cdf_params(x, p)
