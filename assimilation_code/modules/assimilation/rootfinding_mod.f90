@@ -74,7 +74,6 @@ function inv_cdf(quantile_in, cdf, first_guess, p) result(x)
 
    ! Do a test for illegal values on the quantile
    if(quantile <  0.0_r8 .or. quantile > 1.0_r8) then
-      ! Need an error message
       write(errstring, *) 'Illegal Quantile input', quantile
       call error_handler(E_ERR, 'inv_cdf', errstring, source)
    endif
@@ -130,14 +129,24 @@ function inv_cdf(quantile_in, cdf, first_guess, p) result(x)
    ! If we reach this line, then we can't yet bracket the true value of x, so we start
    ! doing steps of the secant method, either until convergence or until we bracket
    ! the root. If we bracket the root then we finish using the ITP method.
-   delta_x = max(1e-8_r8, 1e-8_r8 * abs(x_guess))
-   if (q_err .lt. 0._r8) then
+   x0 = x_guess
+   f0 = q_guess - quantile
+   delta_x = max(1e-2_r8, 1e-2_r8 * abs(x_guess))
+   if (f0 .gt. 0._r8) then
       delta_x = -delta_x
    end if
-   x0 = x_guess
-   x1 = x_guess + delta_x
-   f0 = q_guess - quantile
-   f1 = cdf(x1, p) - quantile
+   do iter=1,7
+      x1 = x_guess + delta_x
+      if(bounded_below .and. (x1 .lt. lower_bound)) x1 = lower_bound
+      if(bounded_above .and. (x1 .gt. upper_bound)) x1 = upper_bound
+      f1 = cdf(x1, p) - quantile
+      delta_f = abs(f1 - f0)
+      if (delta_f .le. 0._r8) then
+         delta_x = 2._r8 * delta_x
+      else
+         exit
+      end if
+   end do
    do iter = 1, max_iterations
       ! If f0 * f1 < 0 then x0 and x1 bracket the root, so go to ITP
       if (f0 * f1 .lt. 0._r8 ) then
@@ -151,7 +160,11 @@ function inv_cdf(quantile_in, cdf, first_guess, p) result(x)
          delta_f = f1 - f0
          if (abs(delta_f) .eq. 0._r8) then ! Stop. Failed step: Flat CDF
             write(errstring, *)  'Failed to converge; flat cdf for quantile ', quantile
-            call error_handler(E_MSG, 'inv_cdf', errstring, source)
+            write(*,*) p%bounded_below, p%bounded_above
+            write(*,*) 'More params:', p%more_params(:)
+            write(*,*) 'iter, x0, x1, f0, f1:', iter, x0, x1, f0, f1
+            write(*,*) 'ens:', p%ens(:)
+            call error_handler(E_MSG, 'rootfinding_mod:inv_cdf', errstring, source)
             x = x1
             return
          else

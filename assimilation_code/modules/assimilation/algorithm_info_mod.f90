@@ -19,7 +19,7 @@ use location_mod, only    : location_type
 
 use distribution_params_mod, only : NORMAL_DISTRIBUTION, BOUNDED_NORMAL_RH_DISTRIBUTION, &
    GAMMA_DISTRIBUTION, BETA_DISTRIBUTION, LOG_NORMAL_DISTRIBUTION, UNIFORM_DISTRIBUTION,  &
-   PARTICLE_FILTER_DISTRIBUTION
+   PARTICLE_FILTER_DISTRIBUTION, KDE_DISTRIBUTION
 
 implicit none
 private
@@ -33,9 +33,11 @@ integer, parameter :: ENKF               = 2
 integer, parameter :: UNBOUNDED_RHF      = 8
 integer, parameter :: GAMMA_FILTER       = 11
 integer, parameter :: BOUNDED_NORMAL_RHF = 101 
+integer, parameter :: KDE_QUAD_FILTER    = 102
 
 public :: obs_error_info, probit_dist_info, obs_inc_info, &
-          EAKF, ENKF, BOUNDED_NORMAL_RHF, UNBOUNDED_RHF, GAMMA_FILTER
+          EAKF, ENKF, BOUNDED_NORMAL_RHF, UNBOUNDED_RHF, GAMMA_FILTER, &
+          KDE_QUAD_FILTER
 
 ! Provides routines that give information about details of algorithms for 
 ! observation error sampling, observation increments, and the transformations
@@ -128,61 +130,61 @@ real(r8), intent(out) :: lower_bound,   upper_bound
 ! In the long run, may not have to have separate controls for each of the input possibilities
 ! However, for now these are things that need to be explored for science understanding
 
-if(is_inflation) then
+! if(is_inflation) then
    ! Case for inflation transformation
    if(kind == QTY_STATE_VARIABLE) then
-      dist_type = BOUNDED_NORMAL_RH_DISTRIBUTION
+      dist_type = KDE_DISTRIBUTION
       bounded_below = .false.;    bounded_above = .false.
       lower_bound   = missing_r8; upper_bound   = missing_r8
    elseif(kind == QTY_TRACER_CONCENTRATION) then
-      dist_type = BOUNDED_NORMAL_RH_DISTRIBUTION
+      dist_type = KDE_DISTRIBUTION
       bounded_below = .true.; bounded_above = .false.
       lower_bound   = 0.0_r8; upper_bound = missing_r8
    elseif(kind == QTY_TRACER_SOURCE) then
-      dist_type = BOUNDED_NORMAL_RH_DISTRIBUTION
+      dist_type = KDE_DISTRIBUTION
       bounded_below = .true.; bounded_above = .false.
       lower_bound   = 0.0_r8; upper_bound   = missing_r8
    else
       write(*, *) 'Illegal kind in obs_error_info'
       stop
    endif
-elseif(is_state) then
-   ! Case for state variable priors
-   if(kind == QTY_STATE_VARIABLE) then
-      dist_type = BOUNDED_NORMAL_RH_DISTRIBUTION
-      bounded_below = .false.;    bounded_above = .false.
-      lower_bound   = missing_r8; upper_bound   = missing_r8
-   elseif(kind == QTY_TRACER_CONCENTRATION) then
-      dist_type = BOUNDED_NORMAL_RH_DISTRIBUTION
-      bounded_below = .true.; bounded_above = .false.
-      lower_bound   = 0.0_r8; upper_bound   = missing_r8
-   elseif(kind == QTY_TRACER_SOURCE) then
-      dist_type = BOUNDED_NORMAL_RH_DISTRIBUTION
-      bounded_below = .true.; bounded_above = .false.
-      lower_bound   = 0.0_r8; upper_bound = missing_r8
-   else
-      write(*, *) 'Illegal kind in obs_error_info'
-      stop
-   endif
-else
-   ! This case is for observation (extended state) priors
-   if(kind == QTY_STATE_VARIABLE) then
-      dist_type = BOUNDED_NORMAL_RH_DISTRIBUTION
-      bounded_below = .false.;    bounded_above = .false.
-      lower_bound   = missing_r8; upper_bound   = missing_r8
-   elseif(kind == QTY_TRACER_CONCENTRATION) then
-      dist_type = BOUNDED_NORMAL_RH_DISTRIBUTION
-      bounded_below = .true.; bounded_above = .false.
-      lower_bound   = 0.0_r8; upper_bound   = missing_r8
-   elseif(kind == QTY_TRACER_SOURCE) then
-      dist_type = BOUNDED_NORMAL_RH_DISTRIBUTION
-      bounded_below = .true.; bounded_above = .false.
-      lower_bound   = 0.0_r8; upper_bound   = missing_r8
-   else
-      write(*, *) 'Illegal kind in obs_error_info'
-      stop
-   endif
-endif
+! elseif(is_state) then
+!    ! Case for state variable priors
+!    if(kind == QTY_STATE_VARIABLE) then
+!       dist_type = KDE_DISTRIBUTION
+!       bounded_below = .false.;    bounded_above = .false.
+!       lower_bound   = missing_r8; upper_bound   = missing_r8
+!    elseif(kind == QTY_TRACER_CONCENTRATION) then
+!       dist_type = BOUNDED_NORMAL_RH_DISTRIBUTION
+!       bounded_below = .true.; bounded_above = .false.
+!       lower_bound   = 0.0_r8; upper_bound   = missing_r8
+!    elseif(kind == QTY_TRACER_SOURCE) then
+!       dist_type = BOUNDED_NORMAL_RH_DISTRIBUTION
+!       bounded_below = .true.; bounded_above = .false.
+!       lower_bound   = 0.0_r8; upper_bound = missing_r8
+!    else
+!       write(*, *) 'Illegal kind in obs_error_info'
+!       stop
+!    endif
+! else
+!    ! This case is for observation (extended state) priors
+!    if(kind == QTY_STATE_VARIABLE) then
+!       dist_type = KDE_DISTRIBUTION
+!       bounded_below = .false.;    bounded_above = .false.
+!       lower_bound   = missing_r8; upper_bound   = missing_r8
+!    elseif(kind == QTY_TRACER_CONCENTRATION) then
+!       dist_type = BOUNDED_NORMAL_RH_DISTRIBUTION
+!       bounded_below = .true.; bounded_above = .false.
+!       lower_bound   = 0.0_r8; upper_bound   = missing_r8
+!    elseif(kind == QTY_TRACER_SOURCE) then
+!       dist_type = BOUNDED_NORMAL_RH_DISTRIBUTION
+!       bounded_below = .true.; bounded_above = .false.
+!       lower_bound   = 0.0_r8; upper_bound   = missing_r8
+!    else
+!       write(*, *) 'Illegal kind in obs_error_info'
+!       stop
+!    endif
+! endif
 
 end subroutine probit_dist_info
 
@@ -210,15 +212,15 @@ real(r8), intent(inout) :: lower_bound,  upper_bound
 
 ! Set the observation increment details for each type of quantity
 if(obs_kind == QTY_STATE_VARIABLE) then
-   filter_kind = BOUNDED_NORMAL_RHF
+   filter_kind = EAKF
    bounded_below = .false.;    bounded_above = .false.
    lower_bound   = missing_r8; upper_bound   = missing_r8
 elseif(obs_kind == QTY_TRACER_CONCENTRATION) then
-   filter_kind = BOUNDED_NORMAL_RHF
+   filter_kind = KDE_QUAD_FILTER
    bounded_below = .true.; bounded_above = .false.
    lower_bound   = 0.0_r8; upper_bound   = missing_r8
 elseif(obs_kind == QTY_TRACER_SOURCE) then
-   filter_kind = BOUNDED_NORMAL_RHF
+   filter_kind = KDE_QUAD_FILTER
    bounded_below = .true.; bounded_above = .false.
    lower_bound   = 0.0_r8; upper_bound   = missing_r8
 else
