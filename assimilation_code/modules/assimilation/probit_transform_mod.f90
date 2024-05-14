@@ -146,6 +146,9 @@ elseif(p%distribution_type == BETA_DISTRIBUTION) then
 elseif(p%distribution_type == BOUNDED_NORMAL_RH_DISTRIBUTION) then
    call to_probit_bounded_normal_rh(ens_size, state_ens, p, probit_ens, &
       use_input_p, bounded_below, bounded_above, lower_bound, upper_bound)
+elseif(p%distribution_type == KDE_DISTRIBUTION) then
+   call to_probit_kde(ens_size, state_ens, p, probit_ens, &
+      use_input_p, bounded_below, bounded_above, lower_bound, upper_bound)
 
 !----------------------------------------------------------------------------------
 ! The following code block tests that the to/from probit calls are nearly inverse
@@ -380,41 +383,6 @@ end subroutine to_probit_bounded_normal_rh
 
 !------------------------------------------------------------------------
 
-! subroutine to_probit_kde(ens_size, state_ens, p, probit_ens, use_input_p, &
-!    bounded_below, bounded_above, lower_bound, upper_bound)
-
-!    integer, intent(in)                  :: ens_size
-!    real(r8), intent(in)                 :: state_ens(ens_size)
-!    type(distribution_params_type), intent(inout) :: p
-!    real(r8), intent(out)                :: probit_ens(ens_size)
-!    logical, intent(in)                  :: use_input_p
-!    logical,  intent(in)                 :: bounded_below, bounded_above
-!    real(r8), intent(in)                 :: lower_bound,   upper_bound
-
-!    ! Probit transform for kernel density estimation.
-!    real(r8) :: quantile
-!    integer  :: i
-!    real(r8) :: y = 0._r8         ! Dummy value, not used
-!    real(r8) :: obs_param = 1._r8 ! Dummy value, not used
-!    integer  :: obs_dist_type = obs_dist_types%uninformative
-
-!    ! Get the parameters for this distribution if not already available
-!    if(.not. use_input_p) then
-!       call pack_kde_params(ens_size, bounded_below, bounded_above, lower_bound, &
-!          upper_bound, state_ens, y, obs_param, obs_dist_type, p)
-!    endif
-
-!    do i = 1, ens_size
-!       ! First, get the quantile for this ensemble member
-!       quantile = kde_cdf_params(state_ens(i), p)
-!       ! Transform to probit/logit space
-!       probit_ens(i) = probit_or_logit_transform(quantile)
-!    end do
-
-! end subroutine to_probit_kde
-
-!------------------------------------------------------------------------
-
 subroutine to_probit_kde(ens_size, state_ens, p, probit_ens, use_input_p, &
    bounded_below, bounded_above, lower_bound, upper_bound)
 
@@ -504,6 +472,19 @@ subroutine to_probit_kde(ens_size, state_ens, p, probit_ens, use_input_p, &
          quantile = kde_cdf_params(state_ens(i), p_interior)
          quantile = (p_int * quantile) + p_lower
       endif
+=======
+   integer  :: obs_dist_type = obs_dist_types%uninformative
+
+   ! Get the parameters for this distribution if not already available
+   if(.not. use_input_p) then
+      call pack_kde_params(ens_size, bounded_below, bounded_above, lower_bound, &
+         upper_bound, state_ens, y, obs_param, obs_dist_type, p)
+   endif
+
+   do i = 1, ens_size
+      ! First, get the quantile for this ensemble member
+      quantile = kde_cdf_params(state_ens(i), p)
+>>>>>>> 24f276cf0ba1fb4b3be7eefe0de0a205948e9ca8
       ! Transform to probit/logit space
       probit_ens(i) = probit_or_logit_transform(quantile)
    end do
@@ -752,6 +733,7 @@ end subroutine from_probit_bounded_normal_rh
 
 !------------------------------------------------------------------------
 
+<<<<<<< HEAD
 ! subroutine from_probit_kde(ens_size, probit_ens, p, state_ens)
 
 !    integer, intent(in)                           :: ens_size
@@ -823,11 +805,23 @@ subroutine from_probit_kde(ens_size, probit_ens, p, state_ens)
    else
       d_max = 0._r8
    endif
+=======
+subroutine from_probit_kde(ens_size, probit_ens, p, state_ens)
+
+   integer, intent(in)                           :: ens_size
+   real(r8), intent(in)                          :: probit_ens(ens_size)
+   type(distribution_params_type), intent(inout) :: p
+   real(r8), intent(out)                         :: state_ens(ens_size)
+
+   integer :: i
+   real(r8) :: quantile
+>>>>>>> 24f276cf0ba1fb4b3be7eefe0de0a205948e9ca8
 
    ! Transform each probit ensemble member back to physical space
    do i = 1, ens_size
       ! First, invert the probit/logit to get quantiles
       quantile = inv_probit_or_logit_transform(probit_ens(i))
+<<<<<<< HEAD
       ! Next invert the mixture CDF to get the physical space ensemble
       if (p%bounded_below .and. (quantile .le. p_lower)) then
          state_ens(i) = p%lower_bound
@@ -842,6 +836,10 @@ subroutine from_probit_kde(ens_size, probit_ens, p, state_ens)
          quantile = (quantile - p_lower) / p_int
          state_ens(i) = inv_kde_cdf_params(quantile, p_interior)
       endif
+=======
+      ! Next invert the kde CDF to get the physical space ensemble
+      state_ens(i) = inv_kde_cdf_params(quantile, p)
+>>>>>>> 24f276cf0ba1fb4b3be7eefe0de0a205948e9ca8
    end do
 
 end subroutine from_probit_kde

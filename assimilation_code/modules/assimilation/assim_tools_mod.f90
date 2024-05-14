@@ -1197,12 +1197,18 @@ subroutine obs_increment_kde(ens, ens_size, y, obs_param, obs_dist_type, &
 
    ! Get mixture component probabilities for the posterior
    if (bounded_below) then
-      p_lower_post = p_lower_prior * likelihood_function(lower_bound, y, obs_param, obs_dist_type)
+      !p_lower_post = p_lower_prior * likelihood_function(lower_bound, y, obs_param, obs_dist_type)
+      ! Hack to use truncated normal obs dist:
+      p_lower_post = p_lower_prior * likelihood_function(lower_bound, y, obs_param, obs_dist_types%truncated_normal, &
+                   bounded_above=bounded_above, bounded_below=bounded_below, upper_bound=upper_bound, lower_bound=lower_bound)
    else
       p_lower_post  = 0._r8
    end if
    if (bounded_above) then
-      p_upper_post = p_upper_prior * likelihood_function(upper_bound, y, obs_param, obs_dist_type)
+      !p_upper_post = p_upper_prior * likelihood_function(upper_bound, y, obs_param, obs_dist_type)
+      ! Hack to use truncated normal obs dist:
+      p_upper_post = p_upper_prior * likelihood_function(upper_bound, y, obs_param, obs_dist_types%truncated_normal, &
+                   bounded_above=bounded_above, bounded_below=bounded_below, upper_bound=upper_bound, lower_bound=lower_bound)
    else
       p_upper_post  = 0._r8
    end if
