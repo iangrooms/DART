@@ -21,8 +21,9 @@ public :: inv_cdf
 
 character(len=512)          :: errstring
 character(len=*), parameter :: source = 'rootfinding_mod.f90'
-real(r8), parameter :: XTOL = 2._r8**(-30) ! relative tolerance on x
-real(r8), parameter :: UTOL = 2._r8**(-36) ! absolute tolerance on u
+real(r8), parameter :: XTOLA = 2._r8**(-27) ! absolute tolerance on x; 47 for beta & gamma
+real(r8), parameter :: XTOLR = 2._r8**(-27) ! relative tolerance on x; 47 for beta & gamma
+real(r8), parameter :: UTOL  = 2._r8**(-36) ! relative tolerance on u; 51 for beta & gamma
 
 contains
 
@@ -61,13 +62,14 @@ function inv_cdf(cdf_in, cdf, first_guess, p) result(quantile)
    ! from Oliveira & Takahashi, ACM Trans Math Soft, 2020. Here f(x) = cdf(x) - cdf_in
 
    ! Local variables:
-   integer,  parameter :: MAX_ITERATIONS  = 50 ! Limit on the total number of iterations.
+   integer,  parameter :: MAX_ITERATIONS  = 25 ! Limit on the total number of iterations.
    real(r8), parameter :: MIN_PROBABILITY = 0.0_r8,  MAX_PROBABILITY = 0.999999999999999_r8
    real(r8) :: u, u_err
    real(r8) :: delta_x, delta_f
    real(r8) :: x_guess, u_guess, x0, x1, f0, f1
    real(r8) :: a, b, fa, fb
    integer  :: iter
+   logical  :: converged
 
    real(r8) :: lower_bound,   upper_bound
    logical  :: bounded_below, bounded_above
@@ -106,39 +108,17 @@ function inv_cdf(cdf_in, cdf, first_guess, p) result(quantile)
    u_guess = cdf(x_guess, p)
 
    ! Check if first guess is close enough
-   u_err = u - u_guess
-   if (abs(u_err) .le. UTOL) then
+   u_err = u_guess - u
+   if (abs(u_err) .le. UTOL * u_guess) then
       quantile = x_guess
       return
    end if
-
-!    ! If bounded below and target probability is between 0 and u_guess, go to ITP
-!    ! This is inefficient when the ensemble is far from the lower bound
-!    if (bounded_below .and. (u .lt. u_guess)) then
-!       a  = lower_bound
-!       b  = x_guess
-!       fa = 0._r8 - u
-!       fb = u_guess - u
-!       quantile = inv_cdf_ITP(cdf, u, a, b, fa, fb, MAX_ITERATIONS, p)
-!       return
-!    end if
-!
-!    ! If bounded above and target probability is between u_guess and 1, go to ITP
-!    ! This is inefficient when the ensemble is far from the upper bound
-!    if (bounded_above .and. (u_guess .lt. u)) then
-!       a  = x_guess
-!       b  = upper_bound
-!       fa = u_guess
-!       fb = 1._r8
-!       quantile = inv_cdf_ITP(cdf, u, a, b, fa, fb, MAX_ITERATIONS, p)
-!       return
-!    end if
 
    ! If we reach this line, then we can't yet bracket the true value of x, so we start
    ! doing steps of the secant method, either until convergence or until we bracket
    ! the root. If we bracket the root then we finish using the ITP method.
    x0 = x_guess
-   f0 = u_guess - u
+   f0 = u_err
    delta_x = max(1e-2_r8, 1e-2_r8 * abs(x_guess))
    if (f0 .gt. 0._r8) then
       delta_x = -delta_x
@@ -189,15 +169,15 @@ function inv_cdf(cdf_in, cdf, first_guess, p) result(quantile)
       end if
 
       ! Finished secant step. Check for convergence.
-      if (abs(delta_x) .le. XTOL * max(abs(x0), abs(x1)) .or. (abs(f1) .le. UTOL)) then
-         return
-      endif
+      converged = (abs(delta_x) .le. XTOLR * max(abs(x0), abs(x1))) .or. &
+                  (abs(f1) .le. UTOL * u)
+      if (converged) return
    end do
 
    ! For now, have switched a failed convergence to return the latest guess
    ! This has implications for stability of probit algorithms that require further study
    ! Not currently happening for any of the test cases on gfortran
-   write(errstring, *)  'Failed to converge for probability ', u
+   write(errstring, *)  'Secant failed to converge for probability ', u
    call error_handler(E_ALLMSG, 'inv_cdf', errstring, source)
    !!!call error_handler(E_ERR, 'inv_cdf', errstring, source)
 
@@ -227,40 +207,43 @@ function inv_cdf_ITP(cdf, u, a, b, fa, fb, max_iterations, p) result(x)
    ! Soft, 2020. Here f(x) = cdf(x) - u. Assumes f(a) < 0 and f(b) > 0 on input.
 
    ! Local variables:
-   real(r8), parameter :: KAPPA2 = 2._r8
+   integer, parameter :: KAPPA2 = 2
+   integer, parameter :: N0     = 2
    real(r8) :: kappa1
    real(r8) :: delta
    real(r8) :: x_t, x_f, x_half, f_ITP
    real(r8) :: eps, r
    real(r8), save :: ln_2 = log(2._r8)
    integer  :: i, n_max, n_half
+   logical  :: converged
 
    kappa1 = 0.2_r8 / (b - a)
-   eps = XTOL * max(abs(a), abs(b))
+   eps = XTOLA
    ! Max number of iterations is either (i) input max, or (ii) number of bisection
    ! iterations needed to achieve the desired relative tolerance on x.
    n_half = max(0, ceiling(log((b - a) / eps) / ln_2) - 1)
-   n_max = min(max_iterations, n_half)
+   n_max = min(max_iterations, n_half + N0)
 
    do i=0,n_max-1
       x_half = 0.5_r8 * (a + b) ! Bisection guess
-      x_f    = (b* fa - a * fb) / (fa - fb) ! Secant/Regula-Falsi guess
+      x_f    = secant_step(a, b, fa, fb)
       delta  = kappa1 * abs(b - a)**KAPPA2
       if (delta .le. abs(x_half - x_f)) then
          x_t = x_f + sign(delta, x_half - x_f)
       else
          x_t = x_half
       end if
-      r = max(0._r8, eps * 2**(n_half + 1 - i) - 0.5_r8 * (b - a))
+      r = max(0._r8, eps * 2**(n_half + N0 - i) - 0.5_r8 * (b - a))
       if (abs(x_t - x_half) .le. r) then
          x = x_t
       else
          x = x_half - sign(r, x_half - x_f)
       end if
       f_ITP = cdf(x, p) - u
-      if (abs(f_ITP) .le. UTOL) then
-         return
-      elseif (f_ITP .gt. 0._r8) then
+      converged = ((b-a) .le. XTOLR * max(abs(a), abs(b))) .or. &
+            ((b-a) .le. XTOLA) .or. (abs(f_ITP) .le. UTOL * u)
+      if (converged) return
+      if (f_ITP .gt. 0._r8) then
          b  = x
          fb = f_ITP
       else
@@ -270,6 +253,18 @@ function inv_cdf_ITP(cdf, u, a, b, fa, fb, max_iterations, p) result(x)
    end do
 
 end function inv_cdf_ITP
+
+!-----------------------------------------------------------------------
+
+function secant_step(a, b, fa, fb) result(x)
+   ! Evaluates a secant step using a formula robust to roundoff for fa*fb<0
+   real(r8), intent(in) :: a, b, fa, fb
+   real(r8)             :: x, wa, wb
+   wa = 1._r8 / (1._r8 - fa / fb)
+   wb = 1._r8 - wa
+   x = wa * a + wb * b
+
+end function secant_step
 
 !-----------------------------------------------------------------------
 
