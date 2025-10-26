@@ -371,6 +371,9 @@ function gq(left, right, p) result(q)
    integer  :: k
    integer, save :: k_max
 
+   ! If not initialized, read in the namelist
+   if(.not. module_initialized) call kde_module_init
+
    if (first_call) then
       first_call = .false.
       select case (quadrature_order)
@@ -431,19 +434,21 @@ end function gq
 !-----------------------------------------------------------------------
 
 subroutine pack_kde_params(ens_size, bounded_below, bounded_above, lower_bound, upper_bound, &
-   ens, y, obs_param, obs_dist_type, p)
-   integer,                        intent(in)  :: ens_size
-   logical,                        intent(in)  :: bounded_below,        bounded_above
-   real(r8),                       intent(in)  :: lower_bound,          upper_bound
-   real(r8),                       intent(in)  :: ens(ens_size)
-   real(r8),                       intent(in)  :: y
-   real(r8),                       intent(in)  :: obs_param
-   integer,                        intent(in)  :: obs_dist_type
-   type(distribution_params_type), intent(out) :: p
+   ens, y, obs_param, obs_dist_type, p, params_in)
+   integer,                                  intent(in)  :: ens_size
+   logical,                                  intent(in)  :: bounded_below, bounded_above
+   real(r8),                                 intent(in)  :: lower_bound,   upper_bound
+   real(r8),                                 intent(in)  :: ens(ens_size)
+   real(r8),                                 intent(in)  :: y
+   real(r8),                                 intent(in)  :: obs_param
+   integer,                                  intent(in)  :: obs_dist_type
+   type(distribution_params_type),           intent(out) :: p
+   type(distribution_params_type), optional, intent(in)  :: params_in
 
    real(r8) :: bandwidths(ens_size)
    real(r8) :: edge, edges(2*ens_size + 2)
    integer  :: i
+   logical  :: params_in_present
 
    ! Set the fixed storage parameters in the distribution_params_type
    p%ens_size = ens_size
@@ -461,12 +466,34 @@ subroutine pack_kde_params(ens_size, bounded_below, bounded_above, lower_bound, 
    ! p%more_params(ens_size + 5:3*ens_size + 6) are the edges.
    ! p%more_params(3*ens_size+7:5*ens_size+8) are the cdf evaluated at the edges.
 
-   ! Save the ensemble values, sorted now so that they don't have to be re-sorted for the first guess
-   p%ens(:) = sort(ens(:))
+   ! If params_in is present, then it holds the prior and we are computing the posterior, i.e.
+   ! we are only updating the normalization constant, obs value, obs parameter, obs dist type,
+   ! and cdf at the edges.
+   if (present(params_in)) then
+      params_in_present = .true.
+      ! Basic check that values in params_in are the same as the input ensemble
+      if (ens_size /= params_in%ens_size) then
+         errstring = 'Input ensemble size does not match optional input parameters '
+         call error_handler(E_ERR, 'pack_kde_params', errstring, source)
+      end if
+   else
+      params_in_present = .false.
+   end if
+
+   if (params_in_present) then
+      p%ens(:) = params_in%ens(:)  ! Already sorted
+   else
+      ! Save the ensemble values, sorted now so that they don't have to be re-sorted for the first guess
+      p%ens(:) = sort(ens(:))
+   end if
 
    ! Store the kernel bandwidths in the more_params array
    ! Important to make sure that p%ens and p%more_params are sorted in same order by passing p%ens rather than ens
-   call get_kde_bandwidths(ens_size, p%ens, bandwidths)
+   if (params_in_present) then
+      bandwidths(:) = params_in%more_params(1:ens_size)
+   else
+      call get_kde_bandwidths(ens_size, p%ens, bandwidths)
+   end if
    p%more_params(1:ens_size) = bandwidths(:)
 
    ! Pack obs information
@@ -474,40 +501,51 @@ subroutine pack_kde_params(ens_size, bounded_below, bounded_above, lower_bound, 
    p%more_params(ens_size + 3) = obs_param
    p%more_params(ens_size + 4) = real(obs_dist_type, r8) ! This is not ideal because it involves a type conversion from int to real
 
-  ! Get the edges of the subintervals on which the pdf is smooth
-   edges(1:ens_size)            = p%ens(:) - bandwidths(:)
-   edges(ens_size+1:2*ens_size) = p%ens(:) + bandwidths(:)
-   if (bounded_below) then
-      edges(2*ens_size+1) = lower_bound
+   if (params_in_present) then
+      edges(:) = params_in%more_params(ens_size+5:3*ens_size+6)
    else
-      edges(2*ens_size+1) = minval(edges(1:ens_size))
+     ! Get the edges of the subintervals on which the pdf is smooth
+      edges(1:ens_size)            = p%ens(:) - bandwidths(:)
+      edges(ens_size+1:2*ens_size) = p%ens(:) + bandwidths(:)
+      if (bounded_below) then
+         edges(2*ens_size+1) = lower_bound
+      else
+         edges(2*ens_size+1) = minval(edges(1:ens_size))
+      end if
+      if (bounded_above) then
+         edges(2*ens_size+2) = upper_bound
+      else
+         edges(2*ens_size+2) = maxval(edges(ens_size+1:2*ens_size))
+      end if
+      edges(:) = sort(edges(:))
    end if
-   if (bounded_above) then
-      edges(2*ens_size+2) = upper_bound
-   else
-      edges(2*ens_size+2) = maxval(edges(ens_size+1:2*ens_size))
-   end if
-   edges(:) = sort(edges(:))
    p%more_params(ens_size+5:3*ens_size+6) = edges(:)
 
-   ! If the ensemble is sufficiently far from the boundary, then we can use the unbounded code, which is cheaper.
-   edge = minval(p%ens(:) - 2*bandwidths(:))
-   if (bounded_below .and. (edge > lower_bound)) then
-      p%bounded_below = .false.
-      p%lower_bound = minval(p%ens(:) - bandwidths(:))
+   if (params_in_present) then
+      p%bounded_below = params_in%bounded_below
+      p%lower_bound   = params_in%lower_bound
+      p%bounded_above = params_in%bounded_above
+      p%upper_bound   = params_in%upper_bound
    else
-      p%bounded_below = bounded_below
-      p%lower_bound = lower_bound
-   end if
+      ! If the ensemble is sufficiently far from the boundary, then we can use the unbounded code, which is cheaper.
+      edge = minval(p%ens(:) - 2*bandwidths(:))
+      if (bounded_below .and. (edge > lower_bound)) then
+         p%bounded_below = .false.
+         p%lower_bound = minval(p%ens(:) - bandwidths(:))
+      else
+         p%bounded_below = bounded_below
+         p%lower_bound = lower_bound
+      end if
 
-   ! If the ensemble is sufficiently far from the boundary, then we can use the unbounded code, which is cheaper.
-   edge = maxval(p%ens(:) + 2*bandwidths(:))
-   if (bounded_above .and. (edge < upper_bound)) then
-      p%bounded_above = .false.
-      p%upper_bound = maxval(p%ens(:) + bandwidths(:))
-   else
-      p%bounded_above = bounded_above
-      p%upper_bound = upper_bound
+      ! If the ensemble is sufficiently far from the boundary, then we can use the unbounded code, which is cheaper.
+      edge = maxval(p%ens(:) + 2*bandwidths(:))
+      if (bounded_above .and. (edge < upper_bound)) then
+         p%bounded_above = .false.
+         p%upper_bound = maxval(p%ens(:) + bandwidths(:))
+      else
+         p%bounded_above = bounded_above
+         p%upper_bound = upper_bound
+      end if
    end if
 
    ! Integrate across all subintervals
@@ -786,9 +824,6 @@ subroutine obs_increment_kde(ens, ens_size, y, obs_param, bounded_below, &
       obs_dist_type = obs_dist_types%normal
    endif
 
-   ! If not initialized, read in the namelist
-   if(.not. module_initialized) call kde_module_init
-
    ! If this is first time through, need to initialize the random sequence.
    ! This will reproduce exactly for multiple runs with the same task count,
    ! but WILL NOT reproduce for a different number of MPI tasks.
@@ -821,7 +856,8 @@ subroutine obs_increment_kde(ens, ens_size, y, obs_param, bounded_below, &
                               params_interior_prior)
          call pack_kde_params(ens_size_interior, bounded_below, bounded_above, lower_bound, upper_bound, &
                               ens_interior, y, obs_param, obs_dist_type, &
-                              params_interior_posterior)
+                              params_interior_posterior, &
+                              params_in=params_interior_prior)
       endif
    else
       d_max = 0._r8

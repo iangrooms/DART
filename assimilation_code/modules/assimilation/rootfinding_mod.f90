@@ -21,6 +21,8 @@ public :: inv_cdf
 
 character(len=512)          :: errstring
 character(len=*), parameter :: source = 'rootfinding_mod.f90'
+real(r8), parameter :: XTOL = 2._r8**(-30) ! relative tolerance on x
+real(r8), parameter :: UTOL = 2._r8**(-36) ! absolute tolerance on u
 
 contains
 
@@ -59,9 +61,8 @@ function inv_cdf(cdf_in, cdf, first_guess, p) result(quantile)
    ! from Oliveira & Takahashi, ACM Trans Math Soft, 2020. Here f(x) = cdf(x) - cdf_in
 
    ! Local variables:
-   integer,  parameter :: MAX_ITERATIONS = 50 ! Limit on the total number of iterations.
+   integer,  parameter :: MAX_ITERATIONS  = 50 ! Limit on the total number of iterations.
    real(r8), parameter :: MIN_PROBABILITY = 0.0_r8,  MAX_PROBABILITY = 0.999999999999999_r8
-   real(r8), parameter :: TOL = epsilon(1._r8)**(0.75_r8) ! Absolute on q, relative on x
    real(r8) :: u, u_err
    real(r8) :: delta_x, delta_f
    real(r8) :: x_guess, u_guess, x0, x1, f0, f1
@@ -106,7 +107,7 @@ function inv_cdf(cdf_in, cdf, first_guess, p) result(quantile)
 
    ! Check if first guess is close enough
    u_err = u - u_guess
-   if (abs(u_err) .le. TOL) then
+   if (abs(u_err) .le. UTOL) then
       quantile = x_guess
       return
    end if
@@ -188,7 +189,7 @@ function inv_cdf(cdf_in, cdf, first_guess, p) result(quantile)
       end if
 
       ! Finished secant step. Check for convergence.
-      if (abs(delta_x) .le. TOL * max(abs(x0), abs(x1)) .or. (abs(f1) .le. TOL)) then
+      if (abs(delta_x) .le. XTOL * max(abs(x0), abs(x1)) .or. (abs(f1) .le. UTOL)) then
          return
       endif
    end do
@@ -226,9 +227,7 @@ function inv_cdf_ITP(cdf, u, a, b, fa, fb, max_iterations, p) result(x)
    ! Soft, 2020. Here f(x) = cdf(x) - u. Assumes f(a) < 0 and f(b) > 0 on input.
 
    ! Local variables:
-   integer,  parameter :: N0 = 1._r8
    real(r8), parameter :: KAPPA2 = 2._r8
-   real(r8), parameter :: TOL = epsilon(1._r8)**(0.75_r8) ! abs on f, rel on x
    real(r8) :: kappa1
    real(r8) :: delta
    real(r8) :: x_t, x_f, x_half, f_ITP
@@ -237,11 +236,11 @@ function inv_cdf_ITP(cdf, u, a, b, fa, fb, max_iterations, p) result(x)
    integer  :: i, n_max, n_half
 
    kappa1 = 0.2_r8 / (b - a)
-   eps = TOL * max(abs(a), abs(b))
+   eps = XTOL * max(abs(a), abs(b))
    ! Max number of iterations is either (i) input max, or (ii) number of bisection
-   ! iterations (plus N0) needed to achieve the desired relative tolerance on x.
-   n_half = max(0, ceiling(log(0.5_r8 * (b - a) / eps) / ln_2))
-   n_max = min(max_iterations, N0 + n_half)
+   ! iterations needed to achieve the desired relative tolerance on x.
+   n_half = max(0, ceiling(log((b - a) / eps) / ln_2) - 1)
+   n_max = min(max_iterations, n_half)
 
    do i=0,n_max-1
       x_half = 0.5_r8 * (a + b) ! Bisection guess
@@ -252,14 +251,14 @@ function inv_cdf_ITP(cdf, u, a, b, fa, fb, max_iterations, p) result(x)
       else
          x_t = x_half
       end if
-      r = max(0._r8, eps * 2**(n_max - i) - 0.5_r8 * (b - a))
+      r = max(0._r8, eps * 2**(n_half + 1 - i) - 0.5_r8 * (b - a))
       if (abs(x_t - x_half) .le. r) then
          x = x_t
       else
          x = x_half - sign(r, x_half - x_f)
       end if
       f_ITP = cdf(x, p) - u
-      if (abs(f_ITP) .le. TOL) then
+      if (abs(f_ITP) .le. UTOL) then
          return
       elseif (f_ITP .gt. 0._r8) then
          b  = x

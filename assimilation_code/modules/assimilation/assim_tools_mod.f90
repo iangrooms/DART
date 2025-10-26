@@ -85,9 +85,7 @@ use gamma_distribution_mod, only : gamma_cdf, inv_gamma_cdf, gamma_mn_var_to_sha
 
 use bnrh_distribution_mod, only   :  inv_bnrh_cdf, bnrh_cdf, inv_bnrh_cdf_like
 
-use kde_distribution_mod, only : kde_cdf_params, inv_kde_cdf_params, obs_dist_types,      &
-                                 pack_kde_params, likelihood_function, separate_ensemble, &
-                                 obs_increment_kde
+use kde_distribution_mod, only : obs_increment_kde
 
 use distribution_params_mod, only : distribution_params_type, deallocate_distribution_params
                                
