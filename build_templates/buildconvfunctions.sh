@@ -29,13 +29,16 @@
 #-------------------------
 set -e
 declare -a programs
-source "$DART"/build_templates/buildpreprocess.sh
 
 # Defaults
 mpisrc="null_mpi"
 m=""
 LIBRARIES=""
 EXTRA=""
+version_def=""
+
+source "$DART"/build_templates/buildpreprocess.sh
+dartversion
 
 #-------------------------
 # print usage and exit
@@ -113,7 +116,8 @@ local misc="$DART/models/utilities/ \
             $DART/assimilation_code/modules/observations/obs_kind_mod.f90 \
             $DART/assimilation_code/modules/observations/obs_sequence_mod.f90 \
             $DART/assimilation_code/modules/observations/forward_operator_mod.f90 \
-            $DART/observations/obs_converters/utilities/obs_utilities_mod.f90"
+            $DART/observations/obs_converters/utilities/obs_utilities_mod.f90 \
+            $DART/build_templates/version_mod.F90"
 local obserrsrc=$DART/observations/obs_converters/obs_error/$OBS_ERROR"_obs_err_mod.f90"
 
 # remove null/mpi from list
@@ -188,7 +192,7 @@ else
   mkmf_libs=""
 fi
  
- $DART/build_templates/mkmf -a $DART -x $m $mkmf_libs -p $(basename $1)  \
+ $DART/build_templates/mkmf -c $version_def -a $DART -x $m $mkmf_libs -p $(basename $1)  \
      $EXTRA \
      $convsrc \
      $program \

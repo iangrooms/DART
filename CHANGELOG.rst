@@ -22,6 +22,216 @@ individual files.
 
 The changes are now listed with the most recent at the top.
 
+**July 16 2026 :: Remove fixsystem. Tag v11.25.0**
+
+New feature / build system update:
+
+  - Removes fixystem script from the build system and subsequently removes compiler dependencies in the code
+
+Bug-fix:
+
+  - Read state before broadcasting single value state space inflation
+  - Fixes logic in which files to read for prior and posterior inflation
+
+Documentation update:
+
+  - Updates the custom.css to use Poppins font
+
+
+**June 24 2026 :: DART_LAB bug fix. Tag v11.24.1**
+
+Bug fix:
+
+  - DART_LAB del_q calculation ens_size + 1
+  
+Documentation update:
+
+  - Readthedocs theme updated to allow server side search.
+
+Repo Infrastructure:
+
+  - quickbuilds added for outstanding DART executables.
+
+
+**May 27 2026 :: Copernicus Observation Converters. Tag v11.24.0**
+
+New Features:
+
+  - Copernicus SSH L3 NRT Observation Converter
+  - Copernicus SST L3S Observation Converter
+ 
+Bug fix:
+
+  - DART version in observation converter logs
+
+
+**May 15 2026 :: CIRRUS GitHub actions. Tag v11.23.1**
+
+New Repo Infrastructure:
+
+ - CIRRUS NCAR cloud GitHub actions for various compilers
+
+Bug fixes:
+
+ - Build functions fix for DART as a submodule
+ - Outstanding model_mod calls routed through assim_model_mod
+
+Documentation update:
+
+ - Identity observations documentation
+
+**April 29 2026 :: Quad Utilities Enhanced Stability & ROMS Memory Improvements. Tag v11.23.0**
+
+ - Improved numerical robustness of quadrilateral interpolation in quad_utils_mod
+ - User documentation for quad_utilities_mod
+ - ROMS_rutgers memory reduction for regular grids added as a quickdbuild.sh option
+
+**April 14 2026 :: WRF nested tutorial. Tag v11.22.0**
+
+New features:
+
+  - New WRF Tutorial with severe storm nested domain example
+  - Automatic downscaling for WRF nested domains
+  - Perturbation step (WRFDA CV3) within tutorial
+  - Assimilation and forecast modes in tutorial
+  - WRF shell scripting converted to function-based bash scripts
+
+Bug-fix:
+
+  - Imposes mandatory terrain-following coordinates to 
+    eliminate boundary condition bug during WRF perturbation step.
+
+Documentation updates:
+
+  - WRF tutorial rewritten for nested Kansas 2024 severe storm example
+
+
+
+**March 23 2026 :: CCE compiler flags. Tag v11.21.2**
+
+- Updated mkmf.template for CCE compiler 
+- Default qtys updated with land qtys
+
+Documentation updates:
+
+  - Removed duplicate list of observation converters
+  - Anchors for observation converter docs
+
+Bug-fix:
+
+  - Removed _r8 from .nml files
+
+**March 6 2026 :: MOM6 clamping. Tag v11.21.1**
+
+MOM6:
+
+  - Add clamping options to model_nml for MOM6
+  - Sets vertical localization coordinate
+  - Bug-fixes:
+
+     - vertical interpolation for thickness was missing first layer thickness
+     - vertical interpolation lev_fract fixed for pseudo-depth
+
+Documentation:
+
+  - pytools documentation added for pyfortran and pyqceff
+
+**February 27 2026 :: pywatershed. Tag v11.21.0**
+
+New features:
+
+  - Interface to hydrologic model pywatershed
+  - GitHub actions for pytools
+
+Bug-fix:
+
+  - Removed check on initialized variables in mkmf.template.ifx
+    due to ifx problems
+
+Documentation updates:
+
+  - NSF NCAR branding update 
+
+**February 4 2026 :: IODA2obsq. Tag v11.20.1**
+
+New feature:
+
+  - Radiances added to pyjedi ioda2obsq tool for DART JEDI interoperability
+ 
+    *contributed by Stephen Herbener, as part of DART collaboration with JCSDA*
+
+Bug-fix:
+
+  - WRF model_mod bug-fix for 3D potential temperature interpolation
+
+**January 8 2026 :: ARVOR Float and SVP Drifters. Tag v11.20.0**
+
+New Features:
+
+  - ARVOR float observation converter
+  - SVP drifter observation converter
+  - csv read utilities
+
+Bug-fix:
+
+  - Remove format read for clamping values in parse_variables_clamp,
+    wrf, mpas, tiegcm that caused integers to be misread.
+
+**January 6 2026 :: DART Data Archive. Tag v11.19.3**
+
+- WRF tutorial updated to get data from data.dart.ucar.edu
+- Fix defaults for MOM6 assimilation period to 1 day
+
+**December 31 2025 :: Log DART version. Tag v11.19.2** 
+
+New Features:
+
+  - | Version of DART logged in program message 
+    | *contributed by Kamil Yousuf*
+  - Tests for parse_args_mod
+  - Remove close_ind array initialization for 3d sphere and 3d 
+    cartesian location_mods to improve get_close performance. 
+
+Bug-fixes:
+
+  - model_mod_check model_size collected in test initialization
+
+**December 3 2025 :: BAMS article. Tag v11.19.1**
+
+Documentation updates:
+
+  - How to cite DART
+  - Bulletin of the American Meteorological Society 2025 article
+
+Bug-fix:
+
+  - Assert sea surface height is present in the state for ROMS Rutgers 
+    model_interpolate
+
+**November 13 2025 :: HF Radar converter. Tag v11.19.0**
+
+New features:
+
+- High Frequency (HF) Radar ocean observation converter
+- ROMS–Rutgers: Option to use Sea Surface Height from the template file, 
+  assuming the ensemble mean is provided in that file.
+
+Bug-fix:
+
+- Corrected consistency check across restarts when fill or missing attributes are NaN. 
+
+**November 11 2025 :: Aether Cube Sphere. Tag v11.18.0**
+
+- Aether cube sphere interface added to DART.
+- SLANT_GPS_VTEC QTY and obs_def
+
+**November 3 2025 :: DART tutorial. Tag 11.17.0**
+
+- DART tutorial updated to QCEFF v11
+- DART tutorial now an extension of DART_LAB
+- Lorenz_96/work directory contains input files needed for DART_LAB6:DART_tutorial
+- PDF tutorial slides relocated to a separate repo: https://github.com/NCAR/dart-tutorial
+
 **October 10 2025 :: Bug-fix: MOM6 localization. Tag v11.16.1**
 
 - Fix state index passed to below_sea_floor
