@@ -16,7 +16,7 @@ use  utilities_mod,       only : file_exist, get_unit, check_namelist_read, do_o
                                  find_namelist_in_file, error_handler,   &
                                  E_ERR, E_MSG, nmlfileunit, do_nml_file, do_nml_term,     &
                                  open_file, close_file, timestamp
-use       sort_mod,       only : index_sort
+use       sort_mod,       only : index_sort, sort
 use random_seq_mod,       only : random_seq_type, random_gaussian, init_random_seq,       &
                                  random_uniform
 
@@ -90,7 +90,7 @@ use kde_distribution_mod, only : kde_cdf_params, inv_kde_cdf_params, obs_dist_ty
                                  obs_increment_kde
 
 use distribution_params_mod, only : distribution_params_type, deallocate_distribution_params
-                               
+
 
 implicit none
 private
@@ -488,7 +488,7 @@ if (convert_all_obs_verticals_first .and. is_doing_vertical_conversion) then
             if (vstatus(i) /= 0) obs_ens_handle%copies(OBS_GLOBAL_QC_COPY, i) = DARTQC_FAILED_VERT_CONVERT
          endif
       enddo
-   endif 
+   endif
 endif
 
 ! Get info on my number and indices for state
@@ -541,7 +541,7 @@ do i = 1, my_num_obs
       ! Need to specify what kind of prior to use for each
       call probit_dist_info(my_obs_kind(i), .false., .false., dist_for_obs, &
          bounded_below, bounded_above, lower_bound, upper_bound)
-   
+
       ! Convert all my obs (extended state) variables to appropriate probit space
       call transform_to_probit(ens_size, obs_ens_handle%copies(1:ens_size, i), dist_for_obs, &
          obs_dist_params(i), probit_ens, .false., &
@@ -641,7 +641,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
             OBS_PRIOR_VAR_END, owners_index)
 
          ! Convert this observation ensemble from probit back to regular space if to_probit was successful
-         if(obs_probit_trans_ok(owners_index)) then 
+         if(obs_probit_trans_ok(owners_index)) then
             call transform_from_probit(ens_size, obs_ens_handle%copies(1:ens_size, owners_index) , &
                obs_dist_params(owners_index), obs_ens_handle%copies(1:ens_size, owners_index))
          endif
@@ -664,7 +664,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
    !-----------------------------------------------------------------------
    else
       call broadcast_recv(map_pe_to_task(ens_handle, owner), obs_prior,    &
-         orig_obs_prior_mean, orig_obs_prior_var,                          & 
+         orig_obs_prior_mean, orig_obs_prior_var,                          &
          scalar1=obs_qc, scalar2=vertvalue_obs_in_localization_coord,      &
          scalar3=whichvert_real, scalar4=my_inflate, scalar5=my_inflate_sd)
       whichvert_obs_in_localization_coord = nint(whichvert_real)
@@ -696,7 +696,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
       ! SHOULD FIGURE OUT A WAY TO PASS THE SORT ORDER
       ! NOTE 2: THIS CONVERSION IS USING THE INFO FROM THE CURRENT (UPDATED) PRIOR ENSEMBLE. THIS
       ! IS GENERALLY GOING TO BE A DIFFERENT PROBIT TRANSFORMED ENSEMBLE THAN THE ONE THAT WAS JUST
-      ! CONVERTED FROM PROBIT SPACE BY THE PROCESS THAT OWNS THIS OBSERVATION. 
+      ! CONVERTED FROM PROBIT SPACE BY THE PROCESS THAT OWNS THIS OBSERVATION.
 
       ! Need to specify what kind of prior to use for obs being assimilated
       call probit_dist_info(base_obs_kind, .false., .false., dist_for_obs, &
@@ -738,7 +738,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
             orig_obs_prior_var(group), obs(1), obs_err_var, grp_size, inflate_only)
       end do
    endif
-  
+
    ! Adaptive localization needs number of other observations within localization radius.
    ! Do get_close_obs first, even though state space increments are computed before obs increments.
    call  get_close_obs_cached(gc_obs, base_obs_loc, base_obs_type,      &
@@ -785,7 +785,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
          my_state_kind(state_index), close_state_dist(j), cutoff_rev)
 
       if(final_factor <= 0.0_r8) cycle STATE_UPDATE
-      
+
       call obs_updates_ens(ens_size, num_groups, ens_handle%copies(1:ens_size, state_index), &
          my_state_loc(state_index), my_state_kind(state_index), obs_prior, obs_inc, &
          obs_prior_mean, obs_prior_var, base_obs_loc, base_obs_type, obs_time, &
@@ -971,7 +971,7 @@ endif
 call obs_inc_info(obs_kind, filter_kind, bounded_below, bounded_above, &
                   lower_bound, upper_bound)
 
-! The first three options in the next if block of code may be inappropriate for 
+! The first three options in the next if block of code may be inappropriate for
 ! some more general filters; need to revisit
 ! If obs_var == 0, delta function.  The mean becomes obs value with no spread.
 ! If prior_var == 0, obs has no effect.  The increments are 0.
@@ -1084,7 +1084,7 @@ integer :: i
 ! Compute the prior quantiles of each ensemble member in the prior gamma distribution
 call gamma_mn_var_to_shape_scale(prior_mean, prior_var, prior_shape, prior_scale)
 do i = 1, ens_size
-   q(i) = gamma_cdf(ens(i), prior_shape, prior_scale) 
+   q(i) = gamma_cdf(ens(i), prior_shape, prior_scale)
 end do
 
 ! Compute the statistics of the continous posterior distribution
@@ -1144,7 +1144,7 @@ real(r8), intent(out) :: obs_inc(ens_size)
 logical,  intent(in)  :: bounded_below, bounded_above
 real(r8), intent(in)  :: lower_bound,   upper_bound
 
-! Does bounded RHF assuming that the prior in outer regions is part of a normal. 
+! Does bounded RHF assuming that the prior in outer regions is part of a normal.
 
 real(r8) :: sort_ens(ens_size), sort_ens_like(ens_size)
 real(r8) :: post(ens_size), sort_post(ens_size), q(ens_size)
@@ -1186,7 +1186,7 @@ sort_post = post(sort_ind)
 do i = 1, ens_size
    obs_inc(sort_ind(i)) = sort_post(i) - ens(sort_ind(i))
    ! It may be possible, although apparently exceedingly unusual, to generate an increment
-   ! here that when added back onto the prior leads to a posterior that is greater than 
+   ! here that when added back onto the prior leads to a posterior that is greater than
    ! the bounds. Unclear if there is any direct way to fix this given that increments are
    ! being passed out.
 end do
@@ -1359,7 +1359,7 @@ end do
 ! By doing it here, can take care of both standard non-deterministic updates
 ! plus non-deterministic obs space covariance inflation. This is expensive, so
 ! don't use it if it's not needed.
-if (sort_obs_inc) then 
+if (sort_obs_inc) then
    new_val = ens + obs_inc
    ! Sorting to make increments as small as possible
    call index_sort(ens, ens_index, ens_size)
@@ -1558,6 +1558,106 @@ state_inc = reg_coef * obs_inc
 
 end subroutine update_from_obs_inc
 
+!------------------------------------------------------------------------
+
+subroutine lowess_precompute(ens_size, k, obs, obs_inc, idx_prior, i_left, eff_weights)
+!========================================================================
+
+! Precomputes values needed for local, weighted linear regression of a {state,obs}
+! variable onto an observation
+
+! I should update this to return idx_posterior and effective weights for the lowess regression evaluated on the forecast ensemble
+   integer,  intent(in)  :: ens_size, k       ! ensemble size; number in local ensemble
+   real(r8), intent(in)  :: obs(ens_size)     ! Prior ensemble in observation space
+   real(r8), intent(in)  :: obs_inc(ens_size) ! Observation ensemble increments
+   integer,  intent(out) :: idx_prior         ! Permutation index to sort obs_inc(:)
+   integer,  intent(out) :: i_left(ens_size)  ! Start index in sorted obs_inc for each eval point
+   real(r8), intent(out) :: eff_weights(k, ens_size) ! Effective weights (k x N_eval)
+
+   integer :: i, j, l_start, l_end, local_idx
+   real(r8) :: h_analysis, dh, w, u, tmp
+   real(r8) :: S0, S1, S2, denom, bw
+   real(r8) :: obs_sorted(ens_size), obs_analysis_sorted(ens_size)
+
+   ! 1. Build contiguous sorted prior/forecast and posterior/analysis arrays
+   call index_sort(obs, idx_prior, ens_size)
+   do i = 1, ens_size
+      obs_sorted(i) = obs(idx_prior(i))
+   end do
+   obs_analysis_sorted(:) = sort(obs(:) + obs_inc(:))
+
+   ! 2. Compute k-NN sliding windows and effective weights for each evaluation target (i.e. each obs analysis)
+   l_start = 1
+   do i = 1, ens_size
+      h_analysis = obs_analysis_sorted(i)
+
+      ! Slide window over obs_sorted to find k-NN around evaluation point h_analysis
+      l_end = l_start + k - 1
+      do while (l_end < ens_size .and. abs(obs_sorted(l_end + 1) - h_analysis) < abs(obs_sorted(l_start) - h_analysis))
+         l_start = l_start + 1
+         l_end   = l_end + 1
+      end do
+      i_left(i) = l_start
+
+      ! Local bandwidth bw = maximum distance to window boundaries in prior data
+      bw = max(abs(obs_sorted(l_start) - h_analysis), abs(obs_sorted(l_end) - h_analysis))
+      if (bw < 1.0e-12_r8) bw = 1.0e-12_r8   ! Guard against division by zero
+
+      ! Compute local moments S0, S1, S2 centered at xe0
+      S0 = 0.0_r8; S1 = 0.0_r8; S2 = 0.0_r8
+      do j = 1, k
+         local_idx = l_start + j - 1
+         dh = obs_sorted(local_idx) - h_analysis
+         
+         ! Tricube kernel: (1 - (|dh|/bw)^3)^3
+         !! Could save a few flops by using (1-(|dh|/bw)^2)
+         u = abs(dh) / bw
+         if (u < 1.0_r8) then
+            tmp = u * u * u
+            w   = (1.0_r8 - tmp)**3
+            !tmp = u * u
+            !w   =  1.0_r8 - tmp
+         else
+            w = 0.0_r8
+         end if
+
+         eff_weights(j, i) = w  ! Temporarily store raw kernel weight
+
+         S0  = S0 + w
+         tmp = w * dh
+         S1  = S1 + tmp
+         S2  = S2 + tmp * dh
+      end do
+
+      ! Convert raw weights into final linear effective weights W_j(h_analysis)
+      denom = S0 * S2 - S1 * S1
+      if (abs(denom) < 1.0e-12_r8) denom = 1.0e-12_r8
+
+      do j = 1, k
+         local_idx = l_start + j - 1
+         dh = obs_sorted(local_idx) - h_analysis
+         w  = eff_weights(j, i)
+         
+         ! Linear effective weight for local linear fit evaluated at xe0
+         eff_weights(j, i) = (w * S2 - w * dh * S1) / denom
+      end do
+   end do
+end subroutine lowess_precompute_eval
+
+!------------------------------------------------------------------------
+
+! Inside the inner evaluation loop for variable m_var:
+do i = 1, N
+   l_start = i_left(i)
+   
+   y_hat = 0.0d0
+   do j = 1, k
+      y_hat = y_hat + eff_weights(j, i) * Y_tr_sorted(l_start + j - 1)
+   end do
+   
+   ! Store fitted response in original order of X_eval
+   Y_fit(idx_eval(i), m_var) = y_hat
+end do
 
 !------------------------------------------------------------------------
 
