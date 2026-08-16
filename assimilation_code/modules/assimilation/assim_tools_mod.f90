@@ -786,11 +786,28 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
 
       if(final_factor <= 0.0_r8) cycle STATE_UPDATE
 
-      call obs_updates_ens(ens_size, num_groups, ens_handle%copies(1:ens_size, state_index), &
-         my_state_loc(state_index), my_state_kind(state_index), obs_prior, obs_inc, &
-         obs_prior_mean, obs_prior_var, base_obs_loc, base_obs_type, obs_time, &
-         net_a, grp_size, grp_beg, grp_end, i, &
-         my_state_indx(state_index), final_factor, correl, local_varying_ss_inflate, inflate_only)
+      ! call obs_updates_ens(ens_size, num_groups, ens_handle%copies(1:ens_size, state_index), &
+      !    my_state_loc(state_index), my_state_kind(state_index), obs_prior, obs_inc, &
+      !    obs_prior_mean, obs_prior_var, base_obs_loc, base_obs_type, obs_time, &
+      !    net_a, grp_size, grp_beg, grp_end, i, &
+      !    my_state_indx(state_index), final_factor, correl, local_varying_ss_inflate, inflate_only)
+
+      ! This is the LOWESS update, which requires precomputing old and new weights and sorting (and logic, etc.....)
+       do i = 1, ens_size
+           ! Apply precomputed weights to the response variable
+           val_new = 0.0
+           val_old = 0.0
+           
+           ! This inner loop should be optimized/vectorized by the compiler
+           do k = 1, K
+               val_new = val_new + weights_new(k, i) * ens_handle%copies(idx_new(k, i), state_index)
+               val_old = val_old + weights_old(k, i) * ens_handle%copies(idx_old(k, i), state_index)
+           end do
+           
+           ! Compute the increment
+           state_increment(i) = val_new - val_old
+       end do
+       ens_handle%copies(:,state_index) = ens_handle%copies(:,state_index) + state_increment(:)
 
       ! Compute spatially-varying state space inflation
       if(local_varying_ss_inflate) then
@@ -1560,7 +1577,8 @@ end subroutine update_from_obs_inc
 
 !------------------------------------------------------------------------
 
-subroutine lowess_precompute(ens_size, k, obs, obs_inc, idx_prior, i_left, eff_weights)
+subroutine lowess_precompute(ens_size, k, obs_prior_sorted, obs_posterior_sorted, i_left_prior, eff_weights_prior, &
+                             i_left_posterior, eff_weights_posterior)
 !========================================================================
 
 ! Precomputes values needed for local, weighted linear regression of a {state,obs}
@@ -1568,11 +1586,13 @@ subroutine lowess_precompute(ens_size, k, obs, obs_inc, idx_prior, i_left, eff_w
 
 ! I should update this to return idx_posterior and effective weights for the lowess regression evaluated on the forecast ensemble
    integer,  intent(in)  :: ens_size, k       ! ensemble size; number in local ensemble
-   real(r8), intent(in)  :: obs(ens_size)     ! Prior ensemble in observation space
-   real(r8), intent(in)  :: obs_inc(ens_size) ! Observation ensemble increments
+   real(r8), intent(in)  :: obs_prior_sorted(ens_size)     ! Prior ensemble in observation space
+   real(r8), intent(in)  :: obs_posterior_sorted(ens_size) ! Observation ensemble increments
    integer,  intent(out) :: idx_prior         ! Permutation index to sort obs_inc(:)
-   integer,  intent(out) :: i_left(ens_size)  ! Start index in sorted obs_inc for each eval point
-   real(r8), intent(out) :: eff_weights(k, ens_size) ! Effective weights (k x N_eval)
+   integer,  intent(out) :: i_left_prior(ens_size)  ! Start index in sorted obs_inc for each prior point
+   real(r8), intent(out) :: eff_weights_prior(k, ens_size) ! Effective weights for the prior (k x N_eval)
+   integer,  intent(out) :: i_left_posterior(ens_size)  ! Start index in sorted obs_inc for each analysis point
+   real(r8), intent(out) :: eff_weights_posterior(k, ens_size) ! Effective weights for the analysis (k x N_eval)
 
    integer :: i, j, l_start, l_end, local_idx
    real(r8) :: h_analysis, dh, w, u, tmp
@@ -1584,7 +1604,51 @@ subroutine lowess_precompute(ens_size, k, obs, obs_inc, idx_prior, i_left, eff_w
    do i = 1, ens_size
       obs_sorted(i) = obs(idx_prior(i))
    end do
+   ! Note that the array below is not necessarily sorted, but has same ordering as prior
    obs_analysis_sorted(:) = sort(obs(:) + obs_inc(:))
+
+   ! 2. Compute k-NN sliding windows and effective weights for each obs forecast point
+   l_start = 1
+   do i = 1, ens_size
+      h_target = obs_analysis(i)
+
+      ! Slide window over obs_sorted to find k-NN around evaluation point h_analysis
+      l_end = l_start + k - 1
+      do while (l_end < ens_size .and. abs(obs_sorted(l_end + 1) - h_target) < abs(obs_sorted(l_start) - h_target))
+         l_start = l_start + 1
+         l_end   = l_end + 1
+      end do
+      i_left(i) = l_start
+
+      ! Local bandwidth bw = maximum distance to window boundaries in prior data
+      bw = max(abs(obs_sorted(l_start) - h_analysis), abs(obs_sorted(l_end) - h_analysis))
+      if (bw < 1.0e-12_r8) bw = 1.0e-12_r8   ! Guard against division by zero
+
+      ! Compute local moments S0, S1, S2 centered at xe0
+      S0 = 0.0_r8; S1 = 0.0_r8; S2 = 0.0_r8
+      do j = 1, k
+         local_idx = l_start + j - 1
+         dh = obs_sorted(local_idx) - h_analysis
+         
+         ! Tricube kernel: (1 - (|dh|/bw)^3)^3
+         !! Could save a few flops by using (1-(|dh|/bw)^2)
+         u = abs(dh) / bw
+         if (u < 1.0_r8) then
+            tmp = u * u * u
+            w   = (1.0_r8 - tmp)**3
+            !tmp = u * u
+            !w   =  1.0_r8 - tmp
+         else
+            w = 0.0_r8
+         end if
+
+         eff_weights(j, i) = w  ! Temporarily store raw kernel weight
+
+         S0  = S0 + w
+         tmp = w * dh
+         S1  = S1 + tmp
+         S2  = S2 + tmp * dh
+      end do
 
    ! 2. Compute k-NN sliding windows and effective weights for each evaluation target (i.e. each obs analysis)
    l_start = 1
