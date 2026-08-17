@@ -248,6 +248,11 @@ if(spread_restoration) then
    call error_handler(E_ERR,'assim_tools_init:', msgstring, source)
 endif
 
+if (lowess .and. sampling_error_correction) then
+   write(msgstring, *) 'Sampling Error Correction is not currently compatible with LOWESS regression'
+   call error_handler(E_ERR,'assim_tools_init:', msgstring, source)
+endif
+
 ! allocate a list in all cases - even the ones where there is only
 ! a single cutoff value.  note that in spite of the name these
 ! are specific types (e.g. RADIOSONDE_TEMPERATURE, AIRCRAFT_TEMPERATURE)
@@ -397,8 +402,6 @@ real(r8) :: probit_ens(ens_size)
 integer :: k ! number of nearest neighbors
 integer, allocatable  :: idx_prior(:,:), idx_posterior(:,:) ! indices of nearest neighbors
 real(r8), allocatable :: weights_prior(:,:), weights_posterior(:,:)
-real(r8) :: regression_increment(ens_size) ! state & extended-state regression increments
-real(r8) :: val_old, val_new ! temp variables for LOWESS regression
 
 ! allocate rather than dump all this on the stack
 allocate(close_obs_dist(     obs_ens_handle%my_num_vars), &
@@ -825,20 +828,9 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
             net_a, grp_size, grp_beg, grp_end, i, &
             my_state_indx(state_index), final_factor, correl, local_varying_ss_inflate, inflate_only)
       else
-         ! TODO: If local_varying_ss_inflate then compute correl
-         do i = 1, ens_size
-            val_new = 0.0_r8
-            val_old = 0.0_r8
-            ! This inner loop should be optimized/vectorized by the compiler
-            do j = 1, k
-               val_new = val_new + weights_posterior(j, i) * ens_handle%copies(idx_posterior(j, i), state_index)
-               val_old = val_old + weights_prior(j, i)     * ens_handle%copies(idx_prior(j, i),     state_index)
-            end do
-
-            ! Compute the increment
-            regression_increment(i) = val_new - val_old
-         end do
-         ens_handle%copies(:,state_index) = ens_handle%copies(:,state_index) + regression_increment(:)
+         call obs_updates_ens_lowess(ens_size, ens_handle%copies(1:ens_size, state_index), obs_prior, &
+            obs_prior_mean, obs_prior_var, k, idx_prior, idx_posterior, weights_prior, weights_posterior, &
+            correl, local_varying_ss_inflate, inflate_only)
       end if
 
       ! Compute spatially-varying state space inflation
@@ -881,19 +873,9 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
                   net_a, grp_size, grp_beg, grp_end, i, &
                   -1*my_obs_indx(obs_index), final_factor, correl, .false., inflate_only)
             else
-               do i = 1, ens_size
-                  val_new = 0.0_r8
-                  val_old = 0.0_r8
-                  ! This inner loop should be optimized/vectorized by the compiler
-                  do j = 1, k
-                     val_new = val_new + weights_posterior(j, i) * obs_ens_handle%copies(idx_posterior(j, i), obs_index)
-                     val_old = val_old + weights_prior(j, i)     * obs_ens_handle%copies(idx_prior(j, i),     obs_index)
-                  end do
-
-                  ! Compute the increment
-                  regression_increment(i) = val_new - val_old
-               end do
-               obs_ens_handle%copies(:,state_index) = obs_ens_handle%copies(:,state_index) + regression_increment(:)
+               call obs_updates_ens_lowess(ens_size, obs_ens_handle%copies(1:ens_size, state_index), obs_prior, &
+                  obs_prior_mean, obs_prior_var, k, idx_prior, idx_posterior, weights_prior, weights_posterior, &
+                  correl, .false., inflate_only)
             end if
          endif
       end do OBS_UPDATE
@@ -1555,8 +1537,8 @@ real(r8),           intent(out)   :: state_inc(ens_size), reg_coef
 real(r8),           intent(in) :: net_a_in
 real(r8), optional, intent(inout) :: correl_out
 
-real(r8) :: obs_state_cov, intermed
-real(r8) :: restoration_inc(ens_size), state_mean, state_var, correl
+real(r8) :: obs_state_cov
+real(r8) :: restoration_inc(ens_size), state_mean, correl
 real(r8) :: factor, exp_true_correl, mean_factor, net_a
 
 
@@ -1583,20 +1565,8 @@ if(present(correl_out) .or. sampling_error_correction) then
    if (obs_state_cov == 0.0_r8 .or. obs_prior_var <= 0.0_r8) then
       correl = 0.0_r8
    else
-      state_var = sum((state - state_mean)**2) / (ens_size - 1)
-      if (state_var <= 0.0_r8) then
-         correl = 0.0_r8
-      else
-         intermed = sqrt(obs_prior_var) * sqrt(state_var)
-         if (intermed <= 0.0_r8) then
-            correl = 0.0_r8
-         else
-            correl = obs_state_cov / intermed
-         endif
-      endif
+      correl = get_correl(ens_size,state,state_mean,obs_prior_var,obs_state_cov)
    endif
-   if(correl >  1.0_r8) correl =  1.0_r8
-   if(correl < -1.0_r8) correl = -1.0_r8
 endif
 if(present(correl_out)) correl_out = correl
 
@@ -1613,8 +1583,6 @@ if(sampling_error_correction) then
    correl = exp_true_correl
 endif
 
-
-
 ! Then compute the increment as product of reg_coef and observation space increment
 state_inc = reg_coef * obs_inc
 
@@ -1628,6 +1596,35 @@ state_inc = reg_coef * obs_inc
 !! need to be studied to see what the real impact would be.
 
 end subroutine update_from_obs_inc
+
+!------------------------------------------------------------------------
+!> Computes cross-correlation between a state variable and an observation
+
+function get_correl(ens_size,state,state_mean,obs_prior_var,obs_state_cov) result(correl)
+   integer,  intent(in) :: ens_size
+   real(r8), intent(in) :: state(ens_size)
+   real(r8), intent(in) :: state_mean
+   real(r8), intent(in) :: obs_prior_var
+   real(r8), intent(in) :: obs_state_cov
+   real(r8)            :: correl
+   ! Local variables
+   real(r8) :: state_var, intermed
+
+   state_var = sum((state - state_mean)**2) / (ens_size - 1)
+   if (state_var <= 0.0_r8) then
+      correl = 0.0_r8
+   else
+      intermed = sqrt(obs_prior_var) * sqrt(state_var)
+      if (intermed <= 0.0_r8) then
+         correl = 0.0_r8
+      else
+         correl = obs_state_cov / intermed
+      endif
+   endif
+   if(correl >  1.0_r8) correl =  1.0_r8
+   if(correl < -1.0_r8) correl = -1.0_r8
+
+end function get_correl
 
 !------------------------------------------------------------------------
 !> Precomputes weights and nearest-neighbor indices needed for local, weighted linear regression of a {state,obs}
@@ -1649,7 +1646,7 @@ subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, idx_prior, idx_pos
    ! Local variables
    integer  :: i, j, l_start, l_end, local_idx
    integer  :: idx_sort(ens_size)
-   real(r8) :: obs_target, obs_dist, w, u
+   real(r8) :: obs_target, obs_dist, w, u, tmp
    real(r8) :: S0, S1, S2, denom, bw
 
    ! Get sort permutation for prior obs ensemble
@@ -1743,11 +1740,11 @@ end subroutine lowess_precompute
 
 subroutine get_k_neighbors(z, k, ens_size, obs_prior, idx_sort, neighbor_idx, bw)
     ! Inputs
-    real(r8), intent(in)  :: z                  ! Target evaluation point
-    integer, intent(in)  :: k                  ! Number of neighbors
-    integer, intent(in)  :: ens_size           ! Total number of training points
-    real(r8), intent(in)  :: old_x(ens_size)    ! Unsorted training predictors
-    integer, intent(in)  :: idx_sort(ens_size) ! Permutation array sorting obs_prior
+    real(r8), intent(in) :: z                  ! Target evaluation point
+    integer,  intent(in) :: k                  ! Number of neighbors
+    integer,  intent(in) :: ens_size           ! Total number of training points
+    real(r8), intent(in) :: obs_prior(ens_size)    ! Unsorted training predictors
+    integer,  intent(in) :: idx_sort(ens_size) ! Permutation array sorting obs_prior
 
     ! Outputs
     integer,  intent(out) :: neighbor_idx(K) ! Original indices of the k neighbors
@@ -2262,6 +2259,7 @@ do i = 1, ens_size
 end do
 
 end subroutine update_ens_from_weights
+
 !---------------------------------------------------------------
 
 subroutine obs_updates_ens(ens_size, num_groups, ens, ens_loc, ens_kind, &
@@ -2321,6 +2319,59 @@ endif
 if(.not. inflate_only) ens = ens + final_factor * increment
 
 end subroutine obs_updates_ens
+
+!---------------------------------------------------------------
+
+subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_prior_var,       &
+                                  k, idx_prior, idx_posterior, weights_prior, weights_posterior, &
+                                  correl, correl_needed, inflate_only)
+   integer,             intent(in)  :: ens_size
+   real(r8),            intent(inout)  :: ens(ens_size)
+   real(r8),            intent(in)  :: obs_prior(ens_size)
+   real(r8),            intent(in)  :: obs_prior_mean(1)
+   real(r8),            intent(in)  :: obs_prior_var(1)
+   integer,             intent(in)  :: k
+   integer,             intent(in)  :: idx_prior(k, ens_size)
+   integer,             intent(in)  :: idx_posterior(k, ens_size)
+   real(r8),            intent(in)  :: weights_prior(k, ens_size)
+   real(r8),            intent(in)  :: weights_posterior(k, ens_size)
+   real(r8),            intent(out) :: correl(1)
+   logical,             intent(in)  :: correl_needed
+   logical,             intent(in)  :: inflate_only
+
+   integer  :: i, j
+   real(r8) :: regression_increment(ens_size) ! regression increments
+   real(r8) :: val_old, val_new ! temp variables for LOWESS regression
+   real(r8) :: obs_state_cov, state_mean
+
+   ! TODO: If local_varying_ss_inflate then compute correl
+   do i = 1, ens_size
+      val_new = 0.0_r8
+      val_old = 0.0_r8
+      ! This inner loop should be optimized/vectorized by the compiler
+      do j = 1, k
+         val_new = val_new + weights_posterior(j, i) * ens(idx_posterior(j, i))
+         val_old = val_old + weights_prior(    j, i) * ens(idx_prior(    j, i))
+      end do
+
+      ! Compute the increment
+      regression_increment(i) = val_new - val_old
+   end do
+   ! Get the updated ensemble
+   if(.not. inflate_only) ens(:) = ens(:) + regression_increment(:)
+
+   ! Get correl, if needed
+   if (correl_needed) then
+      state_mean = sum(ens(:)) / ens_size
+      obs_state_cov = sum( (ens(:) - state_mean) * (obs_prior(:) - obs_prior_mean(1)) ) / (ens_size - 1)
+      if (obs_state_cov == 0.0_r8 .or. obs_prior_var(1) <= 0.0_r8) then
+         correl(1) = 0.0_r8
+      else
+         correl(1) = get_correl(ens_size,ens,state_mean,obs_prior_var(1),obs_state_cov)
+      end if
+   end if
+
+end subroutine obs_updates_ens_lowess
 
 !-------------------------------------------------------------
 
@@ -2791,7 +2842,7 @@ end subroutine log_namelist_selections
 ! TEST FUNCTIONS BELOW THIS POINT
 !-----------------------------------------------------------
 !> test get_state_meta_data
-!> Write out the resutls of get_state_meta_data for each task
+!> Write out the results of get_state_meta_data for each task
 !> They should be the same as the Trunk version
 subroutine test_get_state_meta_data(locations, num_vars)
 
