@@ -193,13 +193,17 @@ logical  :: only_area_adapt  = .true.
 ! compared to previous versions of this namelist item.
 logical  :: distribute_mean  = .false.
 
+! If LOWESS regression is desired instead of simple linear regression, set
+! this to .true.
+logical  :: lowess = .false.
+
 namelist / assim_tools_nml / cutoff, sort_obs_inc,                         &
    spread_restoration, sampling_error_correction,                          &
    adaptive_localization_threshold, adaptive_cutoff_floor,                 &
    print_every_nth_obs, rectangular_quadrature, gaussian_likelihood_tails, &
    output_localization_diagnostics, localization_diagnostics_file,         &
    special_localization_obs_types, special_localization_cutoffs,           &
-   distribute_mean, close_obs_caching,                                     &
+   distribute_mean, close_obs_caching, lowess,                             &
    adjust_obs_impact, obs_impact_filename, allow_any_impact_values,        &
    convert_all_state_verticals_first, convert_all_obs_verticals_first
 
@@ -389,6 +393,13 @@ logical  :: bounded_below, bounded_above
 real(r8) :: lower_bound,   upper_bound
 real(r8) :: probit_ens(ens_size)
 
+! Variables for LOWESS regression
+integer :: k ! number of nearest neighbors
+integer, allocatable  :: idx_prior(:,:), idx_posterior(:,:) ! indices of nearest neighbors
+real(r8), allocatable :: weights_prior(:,:), weights_posterior(:,:)
+real(r8) :: regression_increment(ens_size) ! state & extended-state regression increments
+real(r8) :: val_old, val_new ! temp variables for LOWESS regression
+
 ! allocate rather than dump all this on the stack
 allocate(close_obs_dist(     obs_ens_handle%my_num_vars), &
          close_obs_ind(      obs_ens_handle%my_num_vars), &
@@ -409,6 +420,23 @@ allocate(close_state_dist(     ens_handle%my_num_vars), &
 
 ! Initialize assim_tools_module if needed
 if (.not. module_initialized) call assim_tools_init()
+
+! Initialize k and allocate for LOWESS regression
+if (lowess) then
+   if (num_groups > 1) then
+      write(msgstring,  *) 'The number of groups must be 1 to use LOWESS'
+      call error_handler(E_ERR,'filter_assim:', msgstring, source)
+   endif
+   k = max(5, ens_size / 2) + 1 ! +1 because last neighbor has weight 0 and is thus not used
+   if (k > ens_size) then
+      write(msgstring,  *) 'The number of ensemble members must be more than 5 to use LOWESS'
+      call error_handler(E_ERR,'filter_assim:', msgstring, source)
+   endif
+   allocate(idx_prior(        k, ens_size), &
+            idx_posterior(    k, ens_size), &
+            weights_prior(    k, ens_size), &
+            weights_posterior(k, ens_size))
+end if
 
 !HK make window for mpi one-sided communication
 ! used for vertical conversion in get_close_obs
@@ -768,6 +796,10 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
       num_close_states_calls_made)
    !call test_close_obs_dist(close_state_dist, num_close_states, i)
 
+   ! Initialize LOWESS regression
+   if (lowess) call lowess_precompute(ens_size, k, obs_prior, obs_inc, idx_prior, idx_posterior, &
+                                      weights_prior, weights_posterior)
+
    ! Loop through to update each of my state variables that is potentially close
    STATE_UPDATE: do j = 1, num_close_states
       state_index = close_state_ind(j)
@@ -786,28 +818,28 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
 
       if(final_factor <= 0.0_r8) cycle STATE_UPDATE
 
-      ! call obs_updates_ens(ens_size, num_groups, ens_handle%copies(1:ens_size, state_index), &
-      !    my_state_loc(state_index), my_state_kind(state_index), obs_prior, obs_inc, &
-      !    obs_prior_mean, obs_prior_var, base_obs_loc, base_obs_type, obs_time, &
-      !    net_a, grp_size, grp_beg, grp_end, i, &
-      !    my_state_indx(state_index), final_factor, correl, local_varying_ss_inflate, inflate_only)
+      if (.not. lowess) then
+         call obs_updates_ens(ens_size, num_groups, ens_handle%copies(1:ens_size, state_index), &
+            my_state_loc(state_index), my_state_kind(state_index), obs_prior, obs_inc, &
+            obs_prior_mean, obs_prior_var, base_obs_loc, base_obs_type, obs_time, &
+            net_a, grp_size, grp_beg, grp_end, i, &
+            my_state_indx(state_index), final_factor, correl, local_varying_ss_inflate, inflate_only)
+      else
+         ! TODO: If local_varying_ss_inflate then compute correl
+         do i = 1, ens_size
+            val_new = 0.0_r8
+            val_old = 0.0_r8
+            ! This inner loop should be optimized/vectorized by the compiler
+            do j = 1, k
+               val_new = val_new + weights_posterior(j, i) * ens_handle%copies(idx_posterior(j, i), state_index)
+               val_old = val_old + weights_prior(j, i)     * ens_handle%copies(idx_prior(j, i),     state_index)
+            end do
 
-      ! This is the LOWESS update, which requires precomputing old and new weights and sorting (and logic, etc.....)
-       do i = 1, ens_size
-           ! Apply precomputed weights to the response variable
-           val_new = 0.0
-           val_old = 0.0
-           
-           ! This inner loop should be optimized/vectorized by the compiler
-           do k = 1, K
-               val_new = val_new + weights_new(k, i) * ens_handle%copies(idx_new(k, i), state_index)
-               val_old = val_old + weights_old(k, i) * ens_handle%copies(idx_old(k, i), state_index)
-           end do
-           
-           ! Compute the increment
-           state_increment(i) = val_new - val_old
-       end do
-       ens_handle%copies(:,state_index) = ens_handle%copies(:,state_index) + state_increment(:)
+            ! Compute the increment
+            regression_increment(i) = val_new - val_old
+         end do
+         ens_handle%copies(:,state_index) = ens_handle%copies(:,state_index) + regression_increment(:)
+      end if
 
       ! Compute spatially-varying state space inflation
       if(local_varying_ss_inflate) then
@@ -842,11 +874,27 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
 
             if(final_factor <= 0.0_r8) cycle OBS_UPDATE
 
-            call obs_updates_ens(ens_size, num_groups, obs_ens_handle%copies(1:ens_size, obs_index), &
-               my_obs_loc(obs_index), my_obs_kind(obs_index), obs_prior, obs_inc, &
-               obs_prior_mean, obs_prior_var, base_obs_loc, base_obs_type, obs_time, &
-               net_a, grp_size, grp_beg, grp_end, i, &
-               -1*my_obs_indx(obs_index), final_factor, correl, .false., inflate_only)
+            if (.not. lowess) then
+               call obs_updates_ens(ens_size, num_groups, obs_ens_handle%copies(1:ens_size, obs_index), &
+                  my_obs_loc(obs_index), my_obs_kind(obs_index), obs_prior, obs_inc, &
+                  obs_prior_mean, obs_prior_var, base_obs_loc, base_obs_type, obs_time, &
+                  net_a, grp_size, grp_beg, grp_end, i, &
+                  -1*my_obs_indx(obs_index), final_factor, correl, .false., inflate_only)
+            else
+               do i = 1, ens_size
+                  val_new = 0.0_r8
+                  val_old = 0.0_r8
+                  ! This inner loop should be optimized/vectorized by the compiler
+                  do j = 1, k
+                     val_new = val_new + weights_posterior(j, i) * obs_ens_handle%copies(idx_posterior(j, i), obs_index)
+                     val_old = val_old + weights_prior(j, i)     * obs_ens_handle%copies(idx_prior(j, i),     obs_index)
+                  end do
+
+                  ! Compute the increment
+                  regression_increment(i) = val_new - val_old
+               end do
+               obs_ens_handle%copies(:,state_index) = obs_ens_handle%copies(:,state_index) + regression_increment(:)
+            end if
          endif
       end do OBS_UPDATE
    endif
@@ -920,6 +968,12 @@ deallocate(close_state_dist,      &
            my_state_loc,          &
            obs_probit_trans_ok)
 
+if (lowess) then
+   deallocate(idx_prior,       &
+              idx_posterior,   &
+              weights_prior,   &
+              weights_posterior)
+end if
 ! end dealloc
 
 end subroutine filter_assim
@@ -1576,152 +1630,196 @@ state_inc = reg_coef * obs_inc
 end subroutine update_from_obs_inc
 
 !------------------------------------------------------------------------
+!> Precomputes weights and nearest-neighbor indices needed for local, weighted linear regression of a {state,obs}
+!> variable onto an observation.
 
-subroutine lowess_precompute(ens_size, k, obs_prior_sorted, obs_posterior_sorted, i_left_prior, eff_weights_prior, &
-                             i_left_posterior, eff_weights_posterior)
-!========================================================================
+subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, idx_prior, idx_posterior, &
+                             weights_prior, weights_posterior)
+   ! Inputs
+   integer,  intent(in)  :: ens_size, k                     ! ensemble size, size of local ensemble
+   real(r8), intent(in)  :: obs_prior(ens_size)             ! Prior ensemble in observation space
+   real(r8), intent(in)  :: obs_inc(ens_size)               ! Observation ensemble increments
 
-! Precomputes values needed for local, weighted linear regression of a {state,obs}
-! variable onto an observation
+   ! Outputs
+   integer,  intent(out) :: idx_prior(k,ens_size)           ! Indices of k nearest neighbors to prior in observation space
+   integer,  intent(out) :: idx_posterior(k,ens_size)       ! Indices of k nearest neighbors to posterior in observation space
+   real(r8), intent(out) :: weights_prior(k, ens_size)      ! Effective weights for the prior (k x N_eval)
+   real(r8), intent(out) :: weights_posterior(k, ens_size)  ! Effective weights for the posterior (k x N_eval)
 
-! I should update this to return idx_posterior and effective weights for the lowess regression evaluated on the forecast ensemble
-   integer,  intent(in)  :: ens_size, k       ! ensemble size; number in local ensemble
-   real(r8), intent(in)  :: obs_prior_sorted(ens_size)     ! Prior ensemble in observation space
-   real(r8), intent(in)  :: obs_posterior_sorted(ens_size) ! Observation ensemble increments
-   integer,  intent(out) :: idx_prior         ! Permutation index to sort obs_inc(:)
-   integer,  intent(out) :: i_left_prior(ens_size)  ! Start index in sorted obs_inc for each prior point
-   real(r8), intent(out) :: eff_weights_prior(k, ens_size) ! Effective weights for the prior (k x N_eval)
-   integer,  intent(out) :: i_left_posterior(ens_size)  ! Start index in sorted obs_inc for each analysis point
-   real(r8), intent(out) :: eff_weights_posterior(k, ens_size) ! Effective weights for the analysis (k x N_eval)
-
-   integer :: i, j, l_start, l_end, local_idx
-   real(r8) :: h_analysis, dh, w, u, tmp
+   ! Local variables
+   integer  :: i, j, l_start, l_end, local_idx
+   integer  :: idx_sort(ens_size)
+   real(r8) :: obs_target, obs_dist, w, u
    real(r8) :: S0, S1, S2, denom, bw
-   real(r8) :: obs_sorted(ens_size), obs_analysis_sorted(ens_size)
 
-   ! 1. Build contiguous sorted prior/forecast and posterior/analysis arrays
-   call index_sort(obs, idx_prior, ens_size)
+   ! Get sort permutation for prior obs ensemble
+   call index_sort(obs_prior, idx_sort, ens_size)
+
+   ! Get weights and neighbors for the prior
    do i = 1, ens_size
-      obs_sorted(i) = obs(idx_prior(i))
-   end do
-   ! Note that the array below is not necessarily sorted, but has same ordering as prior
-   obs_analysis_sorted(:) = sort(obs(:) + obs_inc(:))
+      obs_target = obs_prior(i)
 
-   ! 2. Compute k-NN sliding windows and effective weights for each obs forecast point
-   l_start = 1
-   do i = 1, ens_size
-      h_target = obs_analysis(i)
+      ! Get indices of k nearest neighbors of this posterior observation value
+      call get_k_neighbors(obs_target, k, ens_size, obs_prior, idx_sort, idx_prior(:,i), bw)
 
-      ! Slide window over obs_sorted to find k-NN around evaluation point h_analysis
-      l_end = l_start + k - 1
-      do while (l_end < ens_size .and. abs(obs_sorted(l_end + 1) - h_target) < abs(obs_sorted(l_start) - h_target))
-         l_start = l_start + 1
-         l_end   = l_end + 1
-      end do
-      i_left(i) = l_start
-
-      ! Local bandwidth bw = maximum distance to window boundaries in prior data
-      bw = max(abs(obs_sorted(l_start) - h_analysis), abs(obs_sorted(l_end) - h_analysis))
-      if (bw < 1.0e-12_r8) bw = 1.0e-12_r8   ! Guard against division by zero
-
-      ! Compute local moments S0, S1, S2 centered at xe0
+      ! Compute local moments S0, S1, S2 centered at obs_target
       S0 = 0.0_r8; S1 = 0.0_r8; S2 = 0.0_r8
       do j = 1, k
-         local_idx = l_start + j - 1
-         dh = obs_sorted(local_idx) - h_analysis
-         
-         ! Tricube kernel: (1 - (|dh|/bw)^3)^3
-         !! Could save a few flops by using (1-(|dh|/bw)^2)
-         u = abs(dh) / bw
+         obs_dist = obs_prior(idx_sort(j)) - obs_target
+
+         ! Epanechnikov kernel: (1 - (|dh|/bw)^2)
+         u = abs(obs_dist) / bw
          if (u < 1.0_r8) then
-            tmp = u * u * u
-            w   = (1.0_r8 - tmp)**3
-            !tmp = u * u
-            !w   =  1.0_r8 - tmp
+            w   =  1.0_r8 - u * u
          else
             w = 0.0_r8
          end if
 
-         eff_weights(j, i) = w  ! Temporarily store raw kernel weight
+         weights_prior(j,i) = w ! Temporarily store kernel weights
 
          S0  = S0 + w
-         tmp = w * dh
+         tmp = w * obs_dist
          S1  = S1 + tmp
-         S2  = S2 + tmp * dh
+         S2  = S2 + tmp * obs_dist
       end do
 
-   ! 2. Compute k-NN sliding windows and effective weights for each evaluation target (i.e. each obs analysis)
-   l_start = 1
-   do i = 1, ens_size
-      h_analysis = obs_analysis_sorted(i)
-
-      ! Slide window over obs_sorted to find k-NN around evaluation point h_analysis
-      l_end = l_start + k - 1
-      do while (l_end < ens_size .and. abs(obs_sorted(l_end + 1) - h_analysis) < abs(obs_sorted(l_start) - h_analysis))
-         l_start = l_start + 1
-         l_end   = l_end + 1
-      end do
-      i_left(i) = l_start
-
-      ! Local bandwidth bw = maximum distance to window boundaries in prior data
-      bw = max(abs(obs_sorted(l_start) - h_analysis), abs(obs_sorted(l_end) - h_analysis))
-      if (bw < 1.0e-12_r8) bw = 1.0e-12_r8   ! Guard against division by zero
-
-      ! Compute local moments S0, S1, S2 centered at xe0
-      S0 = 0.0_r8; S1 = 0.0_r8; S2 = 0.0_r8
-      do j = 1, k
-         local_idx = l_start + j - 1
-         dh = obs_sorted(local_idx) - h_analysis
-         
-         ! Tricube kernel: (1 - (|dh|/bw)^3)^3
-         !! Could save a few flops by using (1-(|dh|/bw)^2)
-         u = abs(dh) / bw
-         if (u < 1.0_r8) then
-            tmp = u * u * u
-            w   = (1.0_r8 - tmp)**3
-            !tmp = u * u
-            !w   =  1.0_r8 - tmp
-         else
-            w = 0.0_r8
-         end if
-
-         eff_weights(j, i) = w  ! Temporarily store raw kernel weight
-
-         S0  = S0 + w
-         tmp = w * dh
-         S1  = S1 + tmp
-         S2  = S2 + tmp * dh
-      end do
-
-      ! Convert raw weights into final linear effective weights W_j(h_analysis)
+      ! Get denominator in effective-weight formula
       denom = S0 * S2 - S1 * S1
       if (abs(denom) < 1.0e-12_r8) denom = 1.0e-12_r8
 
+      ! Compute effective weights
       do j = 1, k
-         local_idx = l_start + j - 1
-         dh = obs_sorted(local_idx) - h_analysis
-         w  = eff_weights(j, i)
-         
-         ! Linear effective weight for local linear fit evaluated at xe0
-         eff_weights(j, i) = (w * S2 - w * dh * S1) / denom
+         obs_dist = obs_prior(idx_sort(j)) - obs_target
+         w  = weights_prior(j, i)
+         weights_prior(j, i) = w * (S2 - obs_dist * S1) / denom
       end do
    end do
-end subroutine lowess_precompute_eval
+
+   ! Get weights and neighbors for the posterior
+   do i = 1, ens_size
+      obs_target = obs_prior(i) + obs_inc(i)
+
+      ! Get indices of k nearest neighbors of this posterior observation value
+      call get_k_neighbors(obs_target, k, ens_size, obs_prior, idx_sort, idx_posterior(:,i), bw)
+
+      ! Compute local moments S0, S1, S2 centered at obs_target
+      S0 = 0.0_r8; S1 = 0.0_r8; S2 = 0.0_r8
+      do j = 1, k
+         obs_dist = obs_prior(idx_sort(j)) - obs_target
+
+         ! Epanechnikov kernel: (1 - (|dh|/bw)^2)
+         u = abs(obs_dist) / bw
+         if (u < 1.0_r8) then
+            w   =  1.0_r8 - u * u
+         else
+            w = 0.0_r8
+         end if
+
+         weights_posterior(j,i) = w ! Temporarily store kernel weights
+
+         S0  = S0 + w
+         tmp = w * obs_dist
+         S1  = S1 + tmp
+         S2  = S2 + tmp * obs_dist
+      end do
+
+      ! Get denominator in effective-weight formula
+      denom = S0 * S2 - S1 * S1
+      if (abs(denom) < 1.0e-12_r8) denom = 1.0e-12_r8
+
+      ! Compute effective weights
+      do j = 1, k
+         obs_dist = obs_prior(idx_sort(j)) - obs_target
+         w  = weights_posterior(j, i)
+         weights_posterior(j, i) = w * (S2 - obs_dist * S1) / denom
+      end do
+   end do
+
+end subroutine lowess_precompute
 
 !------------------------------------------------------------------------
+!> Returns in neighbor_idx the indices of the k nearest neighbors in
+!> obs_prior to z. Also returns bandwidth = distance to kth neighbor.
 
-! Inside the inner evaluation loop for variable m_var:
-do i = 1, N
-   l_start = i_left(i)
-   
-   y_hat = 0.0d0
-   do j = 1, k
-      y_hat = y_hat + eff_weights(j, i) * Y_tr_sorted(l_start + j - 1)
-   end do
-   
-   ! Store fitted response in original order of X_eval
-   Y_fit(idx_eval(i), m_var) = y_hat
-end do
+subroutine get_k_neighbors(z, k, ens_size, obs_prior, idx_sort, neighbor_idx, bw)
+    ! Inputs
+    real(r8), intent(in)  :: z                  ! Target evaluation point
+    integer, intent(in)  :: k                  ! Number of neighbors
+    integer, intent(in)  :: ens_size           ! Total number of training points
+    real(r8), intent(in)  :: old_x(ens_size)    ! Unsorted training predictors
+    integer, intent(in)  :: idx_sort(ens_size) ! Permutation array sorting obs_prior
+
+    ! Outputs
+    integer,  intent(out) :: neighbor_idx(K) ! Original indices of the k neighbors
+    real(r8), intent(out) :: bw              ! bandwidth = distance to kth neighbor
+
+    ! Local variables
+    integer :: low, high, mid
+    integer :: left, right, i
+    real(r8) :: dist_left, dist_right
+
+    ! Binary search to find the closest single point in sorted obs_prior, part I:
+    low = 1
+    high = ens_size
+    do while (low <= high)
+        mid = (low + high) / 2
+        if (obs_prior(idx_sort(mid)) < z) then
+            low = mid + 1
+        else
+            high = mid - 1
+        end if
+    end do
+
+    ! Binary search to find the closest single point in sorted obs_prior, part II:
+    ! 'low' is now the first sorted-index where obs_prior(idx_sort(low)) >= z.
+    ! Resolve the absolute closest starting index (handling array bounds).
+    if (low > ens_size) then
+        mid = ens_size
+    else if (low == 1) then
+        mid = 1
+    else
+        ! Compare the point just above z and just below z
+        if (abs(obs_prior(idx_sort(low)) - z) < abs(obs_prior(idx_sort(low - 1)) - z)) then
+            mid = low
+        else
+            mid = low - 1
+        end if
+    end if
+
+    ! Sliding window expansion to find exactly k nearest neighbors
+    left = mid
+    right = mid
+
+    do while ((right - left + 1) < k)
+        if (left == 1) then
+            ! Hit the left boundary, must expand right
+            right = right + 1
+        else if (right == ens_size) then
+            ! Hit the right boundary, must expand left
+            left = left - 1
+        else
+            ! Compare the next candidate on the left vs the right
+            dist_left  = abs(obs_prior(idx_sort(left - 1)) - z)
+            dist_right = abs(obs_prior(idx_sort(right + 1)) - z)
+
+            if (dist_left <= dist_right) then
+                left = left - 1
+            else
+                right = right + 1
+            end if
+        end if
+    end do
+
+    ! Store the original (unsorted) indices of the final window
+    do i = 1, k
+        neighbor_idx(i) = idx_sort(left + i - 1)
+    end do
+
+   ! Local bandwidth bw = maximum distance to window boundaries in prior data
+   bw = max(abs(obs_prior(idx_sort(left)) - z), abs(obs_prior(idx_sort(right)) - z))
+   if (bw < 1.0e-12_r8) bw = 1.0e-12_r8   ! Guard against division by zero
+
+end subroutine get_k_neighbors
 
 !------------------------------------------------------------------------
 
