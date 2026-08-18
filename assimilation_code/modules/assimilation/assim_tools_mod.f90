@@ -139,6 +139,7 @@ real(r8) :: cutoff                          = 0.2_r8
 logical  :: sort_obs_inc                    = .true.
 logical  :: spread_restoration              = .false.
 logical  :: sampling_error_correction       = .false.
+logical  :: gcv_localization                = .false.
 integer  :: adaptive_localization_threshold = -1
 real(r8) :: adaptive_cutoff_floor           = 0.0_r8
 integer  :: print_every_nth_obs             = 0
@@ -194,7 +195,7 @@ logical  :: only_area_adapt  = .true.
 logical  :: distribute_mean  = .false.
 
 namelist / assim_tools_nml / cutoff, sort_obs_inc,                         &
-   spread_restoration, sampling_error_correction,                          &
+   spread_restoration, sampling_error_correction, gcv_localization,        &
    adaptive_localization_threshold, adaptive_cutoff_floor,                 &
    print_every_nth_obs, rectangular_quadrature, gaussian_likelihood_tails, &
    output_localization_diagnostics, localization_diagnostics_file,         &
@@ -296,6 +297,12 @@ if(sampling_error_correction) then
    sec_table_size = get_sampling_error_table_size()
    allocate(exp_true_correl(sec_table_size), alpha(sec_table_size))
    ! we can't read the table here because we don't have access to the ens_size
+endif
+
+if (sampling_error_correction .and. gcv_localization) then
+   write(msgstring, *) 'Can not use sampling error correction and GCV localization at the same time'
+      call error_handler(E_ERR,'assim_tools_init:', msgstring, source, &
+                         text2=trim(special_localization_obs_types(i)))
 endif
 
 is_doing_vertical_conversion = (has_vertical_choice() .and. vertical_localization_on())
@@ -1484,7 +1491,7 @@ real(r8),           intent(out)   :: state_inc(ens_size), reg_coef
 real(r8),           intent(in) :: net_a_in
 real(r8), optional, intent(inout) :: correl_out
 
-real(r8) :: obs_state_cov, intermed
+real(r8) :: obs_state_cov, intermed, lambda
 real(r8) :: restoration_inc(ens_size), state_mean, state_var, correl
 real(r8) :: factor, exp_true_correl, mean_factor, net_a
 
@@ -1508,7 +1515,7 @@ endif
 ! Be very cautious if changing any code in this section, taking into
 ! account underflow and overflow for 32 bit floats.
 
-if(present(correl_out) .or. sampling_error_correction) then
+if(present(correl_out) .or. sampling_error_correction .or. gcv_localization) then
    if (obs_state_cov == 0.0_r8 .or. obs_prior_var <= 0.0_r8) then
       correl = 0.0_r8
    else
@@ -1542,7 +1549,15 @@ if(sampling_error_correction) then
    correl = exp_true_correl
 endif
 
-
+! GCV
+if (gcv_localization) then
+   if (correl**2 <= 1.0_r8/real(ens_size,r8)) then
+      reg_coef = 0.0_r8
+   else
+      lambda = (1.0_r8 - correl**2) * obs_prior_var / (ens_size * correl**2 - 1.0_r8)
+      reg_coef = obs_state_cov / (obs_prior_var + lambda)
+   endif
+endif
 
 ! Then compute the increment as product of reg_coef and observation space increment
 state_inc = reg_coef * obs_inc
