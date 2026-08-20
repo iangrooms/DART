@@ -197,13 +197,21 @@ logical  :: distribute_mean  = .false.
 ! this to .true.
 logical  :: lowess = .false.
 
+! If you want to use automatic localization with LOWESS regression
+! (in addition to cutoff-based localization), set this to .true.
+logical  :: lowess_loc = .false.
+
+! The two-sided Z statistic for automatic LOWESS regression is 1.64 by default
+! For tighter tolerances (zero out more increments) increase this to (eg) 1.96
+real(r8) :: Z_CRITICAL = 1.64_r8
+
 namelist / assim_tools_nml / cutoff, sort_obs_inc,                         &
    spread_restoration, sampling_error_correction,                          &
    adaptive_localization_threshold, adaptive_cutoff_floor,                 &
    print_every_nth_obs, rectangular_quadrature, gaussian_likelihood_tails, &
    output_localization_diagnostics, localization_diagnostics_file,         &
    special_localization_obs_types, special_localization_cutoffs,           &
-   distribute_mean, close_obs_caching, lowess,                             &
+   distribute_mean, close_obs_caching, lowess, lowess_loc, Z_CRITICAL,     &
    adjust_obs_impact, obs_impact_filename, allow_any_impact_values,        &
    convert_all_state_verticals_first, convert_all_obs_verticals_first
 
@@ -399,8 +407,11 @@ real(r8) :: lower_bound,   upper_bound
 real(r8) :: probit_ens(ens_size)
 
 ! Variables for LOWESS regression
-integer :: k ! number of nearest neighbors
+integer  :: k ! number of nearest neighbors
+real(r8), allocatable :: weights_prior(:,:)
 real(r8), allocatable :: weights_diff(:,:)
+real(r8), allocatable :: weights_diff_cnorm2(:)
+real(r8) :: df_error
 
 ! allocate rather than dump all this on the stack
 allocate(close_obs_dist(     obs_ens_handle%my_num_vars), &
@@ -436,7 +447,9 @@ if (lowess) then
       call error_handler(E_ERR,'filter_assim:', msgstring, source)
    endif
 
-   allocate(weights_diff(ens_size, ens_size))
+   allocate(weights_prior(ens_size, ens_size), &
+            weights_diff( ens_size, ens_size), &
+            weights_diff_cnorm2(    ens_size))
 end if
 
 !HK make window for mpi one-sided communication
@@ -798,7 +811,8 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
    !call test_close_obs_dist(close_state_dist, num_close_states, i)
 
    ! Initialize LOWESS regression
-   if (lowess) call lowess_precompute(ens_size, k, obs_prior, obs_inc, weights_diff)
+   if (lowess) call lowess_precompute(ens_size, k, obs_prior, obs_inc, weights_prior, weights_diff, &
+      weights_diff_cnorm2, df_error)
 
    ! Loop through to update each of my state variables that is potentially close
    STATE_UPDATE: do j = 1, num_close_states
@@ -826,7 +840,8 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
             my_state_indx(state_index), final_factor, correl, local_varying_ss_inflate, inflate_only)
       else
          call obs_updates_ens_lowess(ens_size, ens_handle%copies(1:ens_size, state_index), obs_prior, &
-            obs_prior_mean, obs_prior_var, k, weights_diff, correl, local_varying_ss_inflate, inflate_only)
+            obs_prior_mean, obs_prior_var, k, weights_prior, weights_diff, weights_diff_cnorm2, df_error, &
+            final_factor, correl, local_varying_ss_inflate, inflate_only)
       end if
 
       ! Compute spatially-varying state space inflation
@@ -870,7 +885,8 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
                   -1*my_obs_indx(obs_index), final_factor, correl, .false., inflate_only)
             else
                call obs_updates_ens_lowess(ens_size, obs_ens_handle%copies(1:ens_size, obs_index), obs_prior, &
-                  obs_prior_mean, obs_prior_var, k, weights_diff, correl, .false., inflate_only)
+                  obs_prior_mean, obs_prior_var, k, weights_prior, weights_diff, weights_diff_cnorm2, df_error, &
+                  final_factor, correl, .false., inflate_only)
             end if
          endif
       end do OBS_UPDATE
@@ -946,7 +962,9 @@ deallocate(close_state_dist,      &
            obs_probit_trans_ok)
 
 if (lowess) then
-   deallocate(weights_diff)
+   deallocate(weights_prior, &
+              weights_diff,  &
+              weights_diff_cnorm2)
 end if
 ! end dealloc
 
@@ -1548,11 +1566,6 @@ endif
 ! If correl_out is present, need correl for adaptive inflation
 ! Also needed for file correction below.
 
-! WARNING: we have had several different numerical problems in this
-! section, especially with users running in single precision floating point.
-! Be very cautious if changing any code in this section, taking into
-! account underflow and overflow for 32 bit floats.
-
 if(present(correl_out) .or. sampling_error_correction) then
    if (obs_state_cov == 0.0_r8 .or. obs_prior_var <= 0.0_r8) then
       correl = 0.0_r8
@@ -1591,6 +1604,10 @@ end subroutine update_from_obs_inc
 
 !------------------------------------------------------------------------
 !> Computes cross-correlation between a state variable and an observation
+!> WARNING: we have had several different numerical problems in this
+!> section, especially with users running in single precision floating point.
+!> Be very cautious if changing any code in this section, taking into
+!> account underflow and overflow for 32 bit floats.
 
 function get_correl(ens_size,state,state_mean,obs_prior_var,obs_state_cov) result(correl)
    integer,  intent(in) :: ens_size
@@ -1622,34 +1639,40 @@ end function get_correl
 !> Precomputes weights and nearest-neighbor indices needed for local, weighted linear regression of a {state,obs}
 !> variable onto an observation.
 
-subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, weights_diff)
+subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, weights_prior, weights_diff, weights_diff_cnorm2, df_error)
    ! Inputs
    integer,  intent(in)  :: ens_size, k                     ! ensemble size, size of local ensemble
    real(r8), intent(in)  :: obs_prior(ens_size)             ! Prior ensemble in observation space
    real(r8), intent(in)  :: obs_inc(ens_size)               ! Observation ensemble increments
 
    ! Outputs
-   real(r8), intent(out) :: weights_diff(ens_size, ens_size)  ! Effective weights for the posterior minus prior
+   real(r8), intent(out) :: weights_prior(ens_size, ens_size)  ! Effective weights for the prior
+   real(r8), intent(out) :: weights_diff(ens_size, ens_size)   ! Effective weights for the posterior minus prior
+   real(r8), intent(out) :: weights_diff_cnorm2(ens_size)      ! squared 2 norm of columns of weights_diff
+   real(r8), intent(out) :: df_error                           ! Tr[(I - S)^T(I-S)] where S^T is weights_prior
 
    ! Local variables
    integer  :: idx_prior(k,ens_size)           ! Indices of k nearest neighbors to prior in observation space
    integer  :: idx_posterior(k,ens_size)       ! Indices of k nearest neighbors to posterior in observation space
-   real(r8) :: weights_prior(ens_size, ens_size)      ! Effective weights for the prior (k x N_eval)
-   real(r8) :: weights_posterior(ens_size, ens_size)  ! Effective weights for the posterior (k x N_eval)
+   real(r8) :: weights_posterior(ens_size, ens_size)  ! Effective weights for the posterior
    integer  :: i, j, l_start, l_end, local_idx
    integer  :: idx_sort(ens_size)
    real(r8) :: obs_prior_sorted(ens_size)
    real(r8) :: obs_target, obs_dist, u, tmp
    real(r8) :: S0, S1, S2, denom, bw
    real(r8) :: w(k)  ! kernel weights
+   real(r8) :: tr_S, tr_STS ! S is weights_prior^T
 
    ! Get sort permutation for prior obs ensemble
    call index_sort(obs_prior, idx_sort, ens_size)
    obs_prior_sorted(:) = sort(obs_prior(:))
 
    ! Get weights and neighbors for the prior
+   !! and auxiliary values tr_S and tr_STS for df_error
    weights_prior(:,:)     = 0.0_r8
    weights_posterior(:,:) = 0.0_r8
+   tr_S   = 0.0_r8
+   tr_STS = 0.0_r8
    do i = 1, ens_size
       obs_target = obs_prior(i)
 
@@ -1679,12 +1702,21 @@ subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, weights_diff)
       denom = S0 * S2 - S1 * S1
       if (abs(denom) < 1.0e-12_r8) denom = 1.0e-12_r8
 
-      ! Compute effective weights
+      ! Compute effective weights and df_error
+
       do j = 1, k
          obs_dist = obs_prior_sorted(idx_prior(j,i)) - obs_target
-         weights_prior(idx_sort(idx_prior(j,i)), i) = w(j) * (S2 - obs_dist * S1) / denom
+         tmp      = w(j) * (S2 - obs_dist * S1) / denom
+         weights_prior(idx_sort(idx_prior(j,i)), i) = tmp
+         if (lowess_loc) tr_STS   = tr_STS + tmp**2
       end do
+      if (lowess_loc) tr_S = tr_S + weights_prior(i,i)
    end do
+   if (lowess_loc) then
+      df_error = max(real(ens_size,r8) - 2*tr_S + tr_STS, 1._r8) ! Not sure the max(., 1) is really necessary - being safe
+   else
+      df_error = 1.0_r8
+   end if
 
    ! Get weights and neighbors for the posterior
    do i = 1, ens_size
@@ -1723,6 +1755,11 @@ subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, weights_diff)
       end do
    end do
    weights_diff(:,:) = weights_posterior(:,:) - weights_prior(:,:)
+   if (lowess_loc) then
+      weights_diff_cnorm2(:) = sum(weights_diff(:,:)**2, 1)
+   else
+      weights_diff_cnorm2(:) = 0.0_r8
+   end if
 
 end subroutine lowess_precompute
 
@@ -2315,27 +2352,55 @@ end subroutine obs_updates_ens
 !---------------------------------------------------------------
 
 subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_prior_var, &
-                                  k, weights_diff, correl, correl_needed, inflate_only)
-   integer,             intent(in)  :: ens_size
-   real(r8),            intent(inout)  :: ens(ens_size)
-   real(r8),            intent(in)  :: obs_prior(ens_size)
-   real(r8),            intent(in)  :: obs_prior_mean(1)
-   real(r8),            intent(in)  :: obs_prior_var(1)
-   integer,             intent(in)  :: k
-   real(r8),            intent(in)  :: weights_diff(ens_size, ens_size)
-   real(r8),            intent(out) :: correl(1)
-   logical,             intent(in)  :: correl_needed
-   logical,             intent(in)  :: inflate_only
+                                  k, weights_prior, weights_diff, weights_diff_cnorm2, df_error, &
+                                  final_factor, correl, correl_needed, inflate_only)
+   ! Arguments
+   integer,             intent(in)    :: ens_size
+   real(r8),            intent(inout) :: ens(ens_size)
+   real(r8),            intent(in)    :: obs_prior(ens_size)
+   real(r8),            intent(in)    :: obs_prior_mean(1)
+   real(r8),            intent(in)    :: obs_prior_var(1)
+   integer,             intent(in)    :: k
+   real(r8),            intent(in)    :: weights_prior(ens_size, ens_size)
+   real(r8),            intent(in)    :: weights_diff( ens_size, ens_size)
+   real(r8),            intent(in)    :: weights_diff_cnorm2(ens_size)
+   real(r8),            intent(in)    :: df_error
+   real(r8),            intent(in)    :: final_factor
+   real(r8),            intent(out)   :: correl(1)
+   logical,             intent(in)    :: correl_needed
+   logical,             intent(in)    :: inflate_only
 
+   ! Local variables
    integer  :: i, j
    real(r8) :: regression_increment(ens_size) ! regression increments
    real(r8) :: obs_state_cov, state_mean
+   real(r8) :: regression_prediction(ens_size),regression_residual(ens_size)
+   real(r8) :: sigma2_hat ! sample estimate of LOWESS regression residual variance
+   real(r8) :: z_stat, se         ! test statistic, standard error
 
    ! Compute the increment
    regression_increment(:) = matmul(ens(:),weights_diff(:,:))
 
+   ! "localization"
+   if (lowess_loc) then
+      regression_prediction(:) = matmul(ens(:), weights_prior(:,:))
+      regression_residual(:)   = ens(:) - regression_prediction(:)
+      sigma2_hat = sum(regression_residual(:)**2) / df_error
+      do i = 1, ens_size
+         se = sqrt(sigma2_hat * weights_diff_cnorm2(i))
+         ! Guard against division by zero in case of identical weights or zero variance
+         if (se > 1.0e-12_r8) then
+            z_stat = abs(regression_increment(i)) / se
+         else
+            z_stat = 0.0_r8
+         end if
+         ! 7. Apply the significance mask. 1.64->0.1, 1.96->0.05
+         if (z_stat <= Z_CRITICAL) regression_increment(i) = 0.0_r8
+      end do
+   end if
+
    ! Get the updated ensemble
-   if(.not. inflate_only) ens(:) = ens(:) + regression_increment(:)
+   if(.not. inflate_only) ens(:) = ens(:) + final_factor * regression_increment(:)
 
    ! Get correl, if needed
    if (correl_needed) then
