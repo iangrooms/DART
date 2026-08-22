@@ -1491,8 +1491,8 @@ real(r8),           intent(out)   :: state_inc(ens_size), reg_coef
 real(r8),           intent(in) :: net_a_in
 real(r8), optional, intent(inout) :: correl_out
 
-real(r8) :: obs_state_cov, intermed, lambda
-real(r8) :: restoration_inc(ens_size), state_mean, state_var, correl
+real(r8) :: obs_state_cov, intermed, correl, correl2
+real(r8) :: restoration_inc(ens_size), state_mean, state_var
 real(r8) :: factor, exp_true_correl, mean_factor, net_a
 
 
@@ -1551,11 +1551,11 @@ endif
 
 ! GCV
 if (gcv_localization) then
-   if (correl**2 <= 1.0_r8/real(ens_size,r8)) then
+   correl2 = correl * correl
+   if (correl2 <= 1.0_r8/real(ens_size,r8)) then
       reg_coef = 0.0_r8
    else
-      lambda = (1.0_r8 - correl**2) * obs_prior_var / (ens_size * correl**2 - 1.0_r8)
-      reg_coef = obs_state_cov / (obs_prior_var + lambda)
+      reg_coef = reg_coef * (ens_size * correl2 - 1.0_r8) / (correl2 * (ens_size - 1))
    endif
 endif
 
