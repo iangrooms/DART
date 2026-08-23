@@ -1552,10 +1552,10 @@ endif
 ! GCV
 if (gcv_localization) then
    correl2 = correl * correl
-   if (correl2 <= 1.0_r8/real(ens_size,r8)) then
+   if (correl2 <= 1.0_r8/real(ens_size-1,r8)) then
       reg_coef = 0.0_r8
    else
-      reg_coef = reg_coef * (ens_size * correl2 - 1.0_r8) / (correl2 * (ens_size - 1))
+      reg_coef = reg_coef * ((ens_size - 1) * correl2 - 1.0_r8) / (correl2 * (ens_size - 2))
    endif
 endif
 
