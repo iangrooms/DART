@@ -98,7 +98,9 @@ private
 public :: filter_assim, &
           set_assim_tools_trace, &
           test_state_copies, &
-          update_ens_from_weights
+          update_ens_from_weights, &
+          get_correction_from_table, &
+          assim_tools_init
 
 ! Indicates if module initialization subroutine has been called yet
 logical :: module_initialized = .false.
@@ -295,6 +297,7 @@ endif
 
 if(sampling_error_correction) then
    sec_table_size = get_sampling_error_table_size()
+   write(*,*) 'sec_table_size: ', sec_table_size
    allocate(exp_true_correl(sec_table_size), alpha(sec_table_size))
    ! we can't read the table here because we don't have access to the ens_size
 endif
@@ -1590,10 +1593,10 @@ real(r8)            :: high_correl, high_exp_correl, high_alpha
 
 logical, save :: first_time = .true.
 
-if (first_time) then
+! if (first_time) then
    call read_sampling_error_correction(ens_size, exp_true_correl, alpha)
-   first_time = .false.
-endif
+!    first_time = .false.
+! endif
 
 ! Interpolate to get values of expected correlation and mean_factor
 if(scorrel < -1.0_r8) then

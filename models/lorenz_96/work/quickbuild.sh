@@ -29,6 +29,7 @@ integrate_model
 obs_common_subset
 obs_diag
 obs_sequence_tool
+output_correction_table
 )
 
 # quickbuild arguments
