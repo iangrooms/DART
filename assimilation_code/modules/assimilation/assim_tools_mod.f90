@@ -2394,7 +2394,7 @@ subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_
          else
             z_stat = 0.0_r8
          end if
-         ! 7. Apply the significance mask. 1.64->0.1, 1.96->0.05
+         ! Apply the significance mask. 1.28->0.2, 1.64->0.1, 1.96->0.05
          if (z_stat <= Z_CRITICAL) regression_increment(i) = 0.0_r8
       end do
    end if
