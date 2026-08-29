@@ -779,6 +779,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
    !call test_close_obs_dist(close_state_dist, num_close_states, i)
 
    ! Loop through to update each of my state variables that is potentially close
+   if (i == 1) write (*,*) 'BEGIN SEC-GCV CORRELATION OUTPUT'
    STATE_UPDATE: do j = 1, num_close_states
       state_index = close_state_ind(j)
 
@@ -800,7 +801,9 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
          my_state_loc(state_index), my_state_kind(state_index), obs_prior, obs_inc, &
          obs_prior_mean, obs_prior_var, base_obs_loc, base_obs_type, obs_time, &
          net_a, grp_size, grp_beg, grp_end, i, &
-         my_state_indx(state_index), final_factor, correl, local_varying_ss_inflate, inflate_only)
+         my_state_indx(state_index), final_factor, correl, .true., inflate_only)
+
+      if (i == 1) write(*,*) 'state_index,', state_index, ', correl,', correl
 
       ! Compute spatially-varying state space inflation
       if(local_varying_ss_inflate) then
@@ -814,6 +817,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
          end do
       endif
    end do STATE_UPDATE
+   if (i == 1) write (*,*) 'END SEC-GCV CORRELATION OUTPUT'
 
    if(.not. inflate_only) then
       ! Now everybody updates their obs priors (only ones after this one)
