@@ -5,6 +5,10 @@
 
 ![DARTlogo](guide/images/Dartboard7.png)
 
+# Disclaimer
+
+This branch is just an archive of code used in a paper developing localization using generalized cross-validation.
+
 # DART 
 
 Welcome to DART, the **Data Assimilation Research Testbed**. DART is an open-source, 
