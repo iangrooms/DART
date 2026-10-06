@@ -41,14 +41,15 @@ integer, parameter :: OBS_PARTICLE       = 4
 integer, parameter :: UNBOUNDED_RHF      = 8
 integer, parameter :: GAMMA_FILTER       = 11
 integer, parameter :: BOUNDED_NORMAL_RHF = 101
-integer, parameter :: KDE_FILTER        = 102
+integer, parameter :: KDE_FILTER         = 102
 
 public :: obs_error_info, probit_dist_info, obs_inc_info, &
-          init_algorithm_info_mod, end_algorithm_info_mod, &
-          EAKF, ENKF, BOUNDED_NORMAL_RHF, UNBOUNDED_RHF, &
-          GAMMA_FILTER, KERNEL, OBS_PARTICLE, KDE_FILTER
+          regression_alg_info, init_algorithm_info_mod,   &
+          end_algorithm_info_mod, EAKF, ENKF,             &
+          BOUNDED_NORMAL_RHF, UNBOUNDED_RHF, GAMMA_FILTER,&
+          KERNEL, OBS_PARTICLE, KDE_FILTER
 
-! type definitions for the QCF table
+! type definitions for the QCEFF table
 type obs_error_info_type
    logical               :: bounded_below, bounded_above
    real(r8)              :: lower_bound,   upper_bound
@@ -84,11 +85,14 @@ type algorithm_info_type
    type(probit_state_type)          :: probit_state
    type(probit_extended_state_type) :: probit_extended_state
    type(obs_inc_info_type)          :: obs_inc_info
+   logical                          :: use_lowess = .false.  ! Default value; can be over-written by QCEFF table
+   logical                          :: lowess_loc = .false.  ! Default value; can be over-written by QCEFF table
+   real(r8)                         :: Z_CRITICAL = 1.64_r8  ! Default value; can be over-written by QCEFF table
 end type
 
 integer, parameter :: HEADER_LINES = 2
 character(len=129), dimension(4) :: header1
-character(len=129), dimension(25) :: header2 ! Number of table columns plus 1
+character(len=129), dimension(28) :: header2 ! Number of table columns plus 1
 
 integer, allocatable :: specified_qtys(:)
 type(algorithm_info_type), allocatable :: qceff_table_data(:)
@@ -110,7 +114,7 @@ contains
 
 subroutine init_algorithm_info_mod()
 
-! Gets number of lines/QTYs in the QCF table, allocates space for the table data
+! Gets number of lines/QTYs in the QCEFF table, allocates space for the table data
 
 
 integer :: fileid
@@ -132,7 +136,7 @@ if (do_nml_term()) write(     *     , nml=algorithm_info_nml)
 
 
 if (qceff_table_filename == '') then
-   write(errstring,*) 'No QCF table file listed in namelist, using default values for all QTYs'
+   write(errstring,*) 'No QCEFF table file listed in namelist, using default values for all QTYs'
    call error_handler(E_MSG, 'init_algorithm_info_mod:', errstring, source)
    return
 endif
@@ -198,7 +202,8 @@ do row = 1, size(qceff_table_data)
                    qceff_table_data(row)%probit_extended_state%bounded_below, qceff_table_data(row)%probit_extended_state%bounded_above, &
                    qceff_table_data(row)%probit_extended_state%lower_bound, qceff_table_data(row)%probit_extended_state%upper_bound, &
                    filter_kind_string(row), qceff_table_data(row)%obs_inc_info%bounded_below, qceff_table_data(row)%obs_inc_info%bounded_above, &
-                   qceff_table_data(row)%obs_inc_info%lower_bound, qceff_table_data(row)%obs_inc_info%upper_bound
+                   qceff_table_data(row)%obs_inc_info%lower_bound, qceff_table_data(row)%obs_inc_info%upper_bound, &
+                   qceff_table_data(row)%use_lowess, qceff_table_data(row)%lowess_loc, qceff_table_data(row)%Z_CRITICAL
    
    call to_upper(qty_string)
    specified_qtys(row) = get_index_for_quantity(qty_string)  
@@ -419,7 +424,7 @@ integer :: QTY_loc(1)
 ! or state variable and about whether the transformation is being done for inflation
 ! or for regress.
  
-! Selects the appropriate transform, which is specified in the QCF input table per QTY. 
+! Selects the appropriate transform, which is specified in the QCEFF input table per QTY. 
 ! At present, the options are NORMAL_DISTRIBUTION, BOUNDED_NORMAL_RH_DISTRIBUTION, 
 ! GAMMA_DISTRIBUTION, BETA_DISTRIBUTION, LOG_NORMAL_DISTRIBUTION,
 ! UNIFORM_DISTRIBUTION
@@ -525,17 +530,52 @@ endif
 
 end subroutine obs_inc_info
 
+!-------------------------------------------------------------------------
+
+
+subroutine regression_alg_info(qty, use_lowess, lowess_loc, Z_CRITICAL)
+
+integer,  intent(in)  :: qty
+logical,  intent(out) :: use_lowess, lowess_loc
+real(r8), intent(out) :: Z_CRITICAL
+
+integer :: QTY_loc(1)
+
+if (.not. module_initialized) call init_algorithm_info_mod()
+
+!use default values if qceff_table_filename is not in namelist
+if (use_qty_defaults) then
+   use_lowess = .false.
+   lowess_loc = .false.
+   Z_CRITICAL = MISSING_R8
+   return
+endif
+
+QTY_loc = findloc(specified_qtys, qty)
+
+if (QTY_loc(1) == 0) then
+   !use default values if QTY is not in table
+   use_lowess = .false.
+   lowess_loc = .false.
+   Z_CRITICAL = MISSING_R8
+else
+   use_lowess = qceff_table_data(QTY_loc(1))%use_lowess
+   lowess_loc = qceff_table_data(QTY_loc(1))%lowess_loc
+   Z_CRITICAL = qceff_table_data(QTY_loc(1))%Z_CRITICAL
+endif
+
+end subroutine regression_alg_info
 !------------------------------------------------------------------------
 
 
 subroutine assert_qceff_table_version()
 
-! Subroutine to ensure the correct version of the QCF table is being used
+! Subroutine to ensure the correct version of the QCEFF table is being used
 
 character(1), parameter :: QCF_VERSION = '1'
 
 if (trim(header1(4)) /= QCF_VERSION) then
-   write(errstring,*) 'Using outdated/incorrect version of the QCF table'
+   write(errstring,*) 'Using outdated/incorrect version of the QCEFF table'
    call error_handler(E_ERR, 'assert_qceff_table_version:', errstring, source)
 endif
 
@@ -546,7 +586,7 @@ end subroutine assert_qceff_table_version
 
 subroutine verify_qceff_table_data()
 
-! Subroutine to ensure that the data in the QCF table is valid 
+! Subroutine to ensure that the data in the QCEFF table is valid 
 
 integer :: row
 
@@ -597,6 +637,14 @@ do row = 1, size(qceff_table_data)
    endif
 end do
 
+! Verify that Z_CRITICAL is never <=0
+do row = 1, size(qceff_table_data)
+   if(qceff_table_data(row)%Z_CRITICAL <= 0.0_r8) then
+      write(errstring,*) trim(get_name_for_quantity(specified_qtys(row))), ' requests negative Z_CRITICAL for LOWESS localization'
+      call error_handler(E_ERR, 'verify_qceff_table_data:', errstring, source)
+   endif
+end do
+
 end subroutine verify_qceff_table_data
 
 !------------------------------------------------------------------------
@@ -604,7 +652,7 @@ end subroutine verify_qceff_table_data
 
 subroutine log_qceff_table_data()
 
-! Subroutine to write the data in QCF table to dart_log
+! Subroutine to write the data in QCEFF table to dart_log
 character(len=2000) :: log_msg
 integer :: row
 
@@ -617,7 +665,7 @@ call error_handler(E_MSG, 'log_qceff_table_data:', 'Logging the data in the QCEF
 write(log_msg, '(2A6, A9, A)') header1(:)
 call error_handler(E_MSG, 'log_qceff_table_data:', trim(log_msg), source)
 
-write(log_msg,'(A10, 2A14, 2A12, 3(A10, 2A14, 2A12), A12, 2A14, 2A12)') header2(:)
+write(log_msg,'(A10, 2A14, 2A12, 3(A10, 2A14, 2A12), A12, 2A14, 2A12, 3A12)') header2(:)
 call error_handler(E_MSG, 'log_qceff_table_data:', trim(log_msg), source)
 
 ! Write the table data to the dart_log and terminal
@@ -631,7 +679,8 @@ do row = 1, size(qceff_table_data)
                qceff_table_data(row)%probit_extended_state%bounded_below, qceff_table_data(row)%probit_extended_state%bounded_above, &
                qceff_table_data(row)%probit_extended_state%lower_bound, qceff_table_data(row)%probit_extended_state%upper_bound, &
                trim(filter_kind_string(row)), qceff_table_data(row)%obs_inc_info%bounded_below, qceff_table_data(row)%obs_inc_info%bounded_above, &
-               qceff_table_data(row)%obs_inc_info%lower_bound, qceff_table_data(row)%obs_inc_info%upper_bound
+               qceff_table_data(row)%obs_inc_info%lower_bound, qceff_table_data(row)%obs_inc_info%upper_bound, &
+               qceff_table_data(row)%use_lowess, qceff_table_data(row)%lowess_loc, qceff_table_data(row)%Z_CRITICAL
 call error_handler(E_MSG, 'log_qceff_table_data:', trim(log_msg), source)
 end do
 

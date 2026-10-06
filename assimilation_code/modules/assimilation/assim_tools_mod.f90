@@ -76,9 +76,9 @@ use probit_transform_mod, only : transform_to_probit, transform_from_probit, &
 
 use normal_distribution_mod, only : normal_cdf, inv_weighted_normal_cdf
 
-use algorithm_info_mod, only : probit_dist_info, obs_inc_info, EAKF, ENKF, &
-                               BOUNDED_NORMAL_RHF, UNBOUNDED_RHF, GAMMA_FILTER, &
-                               KERNEL, OBS_PARTICLE, KDE_FILTER
+use algorithm_info_mod, only : probit_dist_info, obs_inc_info, regression_alg_info, &
+                               EAKF, ENKF, BOUNDED_NORMAL_RHF, UNBOUNDED_RHF, &
+                               GAMMA_FILTER, KERNEL, OBS_PARTICLE, KDE_FILTER
 
 use gamma_distribution_mod, only : gamma_cdf, inv_gamma_cdf, gamma_mn_var_to_shape_scale, &
                                    gamma_gamma_prod
@@ -193,26 +193,14 @@ logical  :: only_area_adapt  = .true.
 ! compared to previous versions of this namelist item.
 logical  :: distribute_mean  = .false.
 
-! If LOWESS regression is desired instead of simple linear regression, set
-! this to .true.
-logical  :: lowess = .false.
-
-! If you want to use automatic localization with LOWESS regression
-! (in addition to cutoff-based localization), set this to .true.
-logical  :: lowess_loc = .false.
-
-! The two-sided Z statistic for automatic LOWESS regression is 1.64 by default
-! For tighter tolerances (zero out more increments) increase this to (eg) 1.96
-real(r8) :: Z_CRITICAL = 1.64_r8
-
 namelist / assim_tools_nml / cutoff, sort_obs_inc,                         &
    spread_restoration, sampling_error_correction,                          &
    adaptive_localization_threshold, adaptive_cutoff_floor,                 &
    print_every_nth_obs, rectangular_quadrature, gaussian_likelihood_tails, &
    output_localization_diagnostics, localization_diagnostics_file,         &
    special_localization_obs_types, special_localization_cutoffs,           &
-   distribute_mean, close_obs_caching, lowess, lowess_loc, Z_CRITICAL,     &
-   adjust_obs_impact, obs_impact_filename, allow_any_impact_values,        &
+   distribute_mean, close_obs_caching, adjust_obs_impact,                  &
+   obs_impact_filename, allow_any_impact_values,                           &
    convert_all_state_verticals_first, convert_all_obs_verticals_first
 
 !============================================================================
@@ -253,11 +241,6 @@ if (task_count() == 1) distribute_mean = .true.
 if(spread_restoration) then
    write(msgstring, *) 'The spread_restoration option is not supported in this version of ', &
                        'DART. Contact the DAReS team if this option is needed '
-   call error_handler(E_ERR,'assim_tools_init:', msgstring, source)
-endif
-
-if (lowess .and. sampling_error_correction) then
-   write(msgstring, *) 'Sampling Error Correction is not currently compatible with LOWESS regression'
    call error_handler(E_ERR,'assim_tools_init:', msgstring, source)
 endif
 
@@ -407,11 +390,12 @@ real(r8) :: lower_bound,   upper_bound
 real(r8) :: probit_ens(ens_size)
 
 ! Variables for LOWESS regression
-integer  :: k ! number of nearest neighbors
+logical  :: lowess, lowess_loc
+integer  :: k_lowess ! number of nearest neighbors
 real(r8), allocatable :: weights_prior(:,:)
 real(r8), allocatable :: weights_diff(:,:)
 real(r8), allocatable :: weights_diff_cnorm2(:)
-real(r8) :: df_error
+real(r8) :: df_error, Z_CRITICAL
 
 ! allocate rather than dump all this on the stack
 allocate(close_obs_dist(     obs_ens_handle%my_num_vars), &
@@ -435,22 +419,10 @@ allocate(close_state_dist(     ens_handle%my_num_vars), &
 if (.not. module_initialized) call assim_tools_init()
 
 ! Initialize k and allocate for LOWESS regression
-if (lowess) then
-   if (num_groups > 1) then
-      write(msgstring,  *) 'The number of groups must be 1 to use LOWESS'
-      call error_handler(E_ERR,'filter_assim:', msgstring, source)
-   endif
-
-   k = max(5, ens_size / 2)
-   if (k > ens_size) then
-      write(msgstring,  *) 'The number of ensemble members must be more than 5 to use LOWESS'
-      call error_handler(E_ERR,'filter_assim:', msgstring, source)
-   endif
-
-   allocate(weights_prior(ens_size, ens_size), &
-            weights_diff( ens_size, ens_size), &
-            weights_diff_cnorm2(    ens_size))
-end if
+k_lowess = max(5, ens_size / 2)
+allocate(weights_prior(ens_size, ens_size), &
+      weights_diff( ens_size, ens_size), &
+      weights_diff_cnorm2(    ens_size))
 
 !HK make window for mpi one-sided communication
 ! used for vertical conversion in get_close_obs
@@ -811,8 +783,10 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
    !call test_close_obs_dist(close_state_dist, num_close_states, i)
 
    ! Initialize LOWESS regression
-   if (lowess) call lowess_precompute(ens_size, k, obs_prior, obs_inc, weights_prior, weights_diff, &
-      weights_diff_cnorm2, df_error)
+   call regression_alg_info(base_obs_kind, lowess, lowess_loc, Z_CRITICAL)
+   if (ens_size < k_lowess) lowess = .false.
+   if (lowess) call lowess_precompute(ens_size, k_lowess, obs_prior, obs_inc, lowess_loc, weights_prior, &
+      weights_diff, weights_diff_cnorm2, df_error)
 
    ! Loop through to update each of my state variables that is potentially close
    STATE_UPDATE: do j = 1, num_close_states
@@ -840,8 +814,8 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
             my_state_indx(state_index), final_factor, correl, local_varying_ss_inflate, inflate_only)
       else
          call obs_updates_ens_lowess(ens_size, ens_handle%copies(1:ens_size, state_index), obs_prior, &
-            obs_prior_mean, obs_prior_var, k, weights_prior, weights_diff, weights_diff_cnorm2, df_error, &
-            final_factor, correl, local_varying_ss_inflate, inflate_only)
+            obs_prior_mean, obs_prior_var, k_lowess, weights_prior, weights_diff, weights_diff_cnorm2, df_error, &
+            final_factor, correl, local_varying_ss_inflate, inflate_only, lowess_loc, Z_CRITICAL)
       end if
 
       ! Compute spatially-varying state space inflation
@@ -885,8 +859,8 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
                   -1*my_obs_indx(obs_index), final_factor, correl, .false., inflate_only)
             else
                call obs_updates_ens_lowess(ens_size, obs_ens_handle%copies(1:ens_size, obs_index), obs_prior, &
-                  obs_prior_mean, obs_prior_var, k, weights_prior, weights_diff, weights_diff_cnorm2, df_error, &
-                  final_factor, correl, .false., inflate_only)
+                  obs_prior_mean, obs_prior_var, k_lowess, weights_prior, weights_diff, weights_diff_cnorm2, &
+                  df_error, final_factor, correl, .false., inflate_only, lowess_loc, Z_CRITICAL)
             end if
          endif
       end do OBS_UPDATE
@@ -1639,11 +1613,13 @@ end function get_correl
 !> Precomputes weights and nearest-neighbor indices needed for local, weighted linear regression of a {state,obs}
 !> variable onto an observation.
 
-subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, weights_prior, weights_diff, weights_diff_cnorm2, df_error)
+subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, lowess_loc, weights_prior, weights_diff, &
+                             weights_diff_cnorm2, df_error)
    ! Inputs
    integer,  intent(in)  :: ens_size, k                     ! ensemble size, size of local ensemble
    real(r8), intent(in)  :: obs_prior(ens_size)             ! Prior ensemble in observation space
    real(r8), intent(in)  :: obs_inc(ens_size)               ! Observation ensemble increments
+   logical,  intent(in)  :: lowess_loc                      ! Precompute for "localization"
 
    ! Outputs
    real(r8), intent(out) :: weights_prior(ens_size, ens_size)  ! Effective weights for the prior
@@ -2353,7 +2329,8 @@ end subroutine obs_updates_ens
 
 subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_prior_var, &
                                   k, weights_prior, weights_diff, weights_diff_cnorm2, df_error, &
-                                  final_factor, correl, correl_needed, inflate_only)
+                                  final_factor, correl, correl_needed, inflate_only, lowess_loc, &
+                                  Z_CRITICAL)
    ! Arguments
    integer,             intent(in)    :: ens_size
    real(r8),            intent(inout) :: ens(ens_size)
@@ -2369,6 +2346,8 @@ subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_
    real(r8),            intent(out)   :: correl(1)
    logical,             intent(in)    :: correl_needed
    logical,             intent(in)    :: inflate_only
+   logical,             intent(in)    :: lowess_loc
+   real(r8),            intent(in)    :: Z_CRITICAL
 
    ! Local variables
    integer  :: i, j
