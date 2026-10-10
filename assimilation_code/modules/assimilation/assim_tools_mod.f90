@@ -1803,23 +1803,42 @@ subroutine get_k_neighbors(z, k, ens_size, obs_prior_sorted, neighbor_idx, bw)
       neighbor_idx(i) = left + i - 1
    end do
 
-   ! One more iteration for bandwidth
-   if (left == 1) then
-      right = right + 1
-   else if (right == ens_size) then
-      left = left - 1
-   else
-      dist_left  = z - obs_prior_sorted(left - 1)
-      dist_right = obs_prior_sorted(right + 1) - z
-      if (dist_left <= dist_right) then
+   ! Distance to the Kth nearest neighbor
+   bw = max(abs(obs_prior_sorted(left) - z), &
+            abs(obs_prior_sorted(right) - z))
+
+   ! Expand the window until the bandwidth is strictly greater
+   ! than the distance to the Kth nearest neighbor.
+   do while (left > 1 .or. right < ens_size)
+
+      if (left == 1) then
+         right = right + 1
+      else if (right == ens_size) then
          left = left - 1
       else
-         right = right + 1
-      end if
-   end if
+         dist_left  = z - obs_prior_sorted(left - 1)
+         dist_right = obs_prior_sorted(right + 1) - z
 
-   bw = max(abs(obs_prior_sorted(left) - z), abs(obs_prior_sorted(right) - z))
-   if (bw < 1.0e-12_r8) bw = 1.0e-12_r8
+         if (dist_left <= dist_right) then
+            left = left - 1
+         else
+            right = right + 1
+         end if
+      end if
+
+      ! Check whether the expanded window provides a larger bandwidth
+      dist_left  = z - obs_prior_sorted(left)
+      dist_right = obs_prior_sorted(right) - z
+
+      if (max(dist_left, dist_right) > bw) then
+         bw = max(dist_left, dist_right)
+         exit
+      end if
+   end do
+
+   ! Handle the case where all remaining neighbors are tied
+   ! at the Kth-neighbor distance, including the case bw = 0.
+   bw = max(bw * (1.0_r8 + 1.0e-8_r8), 1.0e-12_r8)
 
 end subroutine get_k_neighbors
 
