@@ -1751,7 +1751,7 @@ subroutine get_k_neighbors(z, k, ens_size, obs_prior_sorted, neighbor_idx, bw)
    real(r8), intent(out) :: bw
 
    integer :: low, high, mid, left, right, i, count
-   real(r8) :: dist_left, dist_right
+   real(r8) :: dist_left, dist_right, dist_k
 
    ! Binary search for nearest neighbor
    low = 1
@@ -1804,8 +1804,9 @@ subroutine get_k_neighbors(z, k, ens_size, obs_prior_sorted, neighbor_idx, bw)
    end do
 
    ! Distance to the Kth nearest neighbor
-   bw = max(abs(obs_prior_sorted(left) - z), &
-            abs(obs_prior_sorted(right) - z))
+   dist_k = max(z - obs_prior_sorted(left), &
+                obs_prior_sorted(right) - z)
+   bw = dist_k
 
    ! Expand the window until the bandwidth is strictly greater
    ! than the distance to the Kth nearest neighbor.
@@ -1827,18 +1828,17 @@ subroutine get_k_neighbors(z, k, ens_size, obs_prior_sorted, neighbor_idx, bw)
       end if
 
       ! Check whether the expanded window provides a larger bandwidth
-      dist_left  = z - obs_prior_sorted(left)
-      dist_right = obs_prior_sorted(right) - z
+      bw = max(z - obs_prior_sorted(left), &
+               obs_prior_sorted(right) - z)
 
-      if (max(dist_left, dist_right) > bw) then
-         bw = max(dist_left, dist_right)
-         exit
-      end if
+      if (bw > dist_k) exit
    end do
 
-   ! Handle the case where all remaining neighbors are tied
-   ! at the Kth-neighbor distance, including the case bw = 0.
-   bw = max(bw * (1.0_r8 + 1.0e-8_r8), 1.0e-12_r8)
+   ! If all remaining observations are tied at the Kth-neighbor
+   ! distance, make the bandwidth slightly larger.
+   if (bw <= dist_k) then
+      bw = max(dist_k * (1.0_r8 + 1.0e-8_r8), 1.0e-12_r8)
+   end if
 
 end subroutine get_k_neighbors
 
