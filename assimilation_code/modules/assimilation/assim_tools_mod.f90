@@ -1618,20 +1618,13 @@ pure real(r8) function gcv_shrinkage(r2, k) result(s)
    real(r8), intent(in) :: r2
    integer,  intent(in) :: k
 
-   s = 0.0_r8
-
-   if (k <= 2) return
-
-   if (r2 > 1.0_r8 / real(k-1, r8)) then
-      s = ((k-1)*r2 - 1.0_r8) / ((k-2)*r2)
-   end if
+   s = max(0._r8, ((k-1)*r2 - 1.0_r8) / ((k-2)*r2))
 
 end function gcv_shrinkage
 
 !------------------------------------------------------------------------
 !> Precomputes weights and nearest-neighbor indices needed for local, weighted linear regression of a {state,obs}
 !> variable onto an observation.
-
 
 subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, &
                             p_f, q_f, vx_f, d_f, &
@@ -2382,48 +2375,48 @@ subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_
    real(r8) :: b_f(ens_size), b_a(ens_size)
    real(r8) :: s_f(ens_size), s_a(ens_size)
    real(r8) :: regression_increment(ens_size)
-   real(r8) :: v_f, v_a, r2, tmp
-   real(r8) :: obs_state_cov, state_mean
+   real(r8) :: z(ens_size), zsq(ens_size)
+   real(r8) :: v_f(ens_size), v_a(ens_size)
+   real(r8) :: r2, center, obs_state_cov, state_mean
 
-   ! Local weighted response means
-   mu_f = matmul(ens, p_f)
-   mu_a = matmul(ens, p_a)
+   ! Center the response vector for numerical stability in variance calculation.
+   center = sum(ens) / ens_size
+   z(:) = ens(:) - center
+   zsq(:) = z(:) * z(:)
 
-   ! Unregularized local regression slopes
-   b_f = matmul(ens, q_f)
-   b_a = matmul(ens, q_a)
+   ! Local weighted response means. These are not the actual means because of
+   ! centering, but when we subtract mu_a - mu_f to get the increment the
+   ! centering cancels.
+   mu_f(:) = matmul(z(:), p_f(:,:))
+   mu_a(:) = matmul(z(:), p_a(:,:))
+
+   ! Unregularized local regression slopes. Centering, i.e. replacing ens(:) with
+   ! z(:) is justified here because matmul(ones(:), q_{f,a}(:)) = 0
+   b_f(:) = matmul(z(:), q_f(:,:))
+   b_a(:) = matmul(z(:), q_a(:,:))
+
+   ! Local weighted response variances. The centering above improves numerical
+   ! stability of this calculation.
+   v_f(:) = matmul(zsq(:), p_f(:,:)) - mu_f(:)*mu_f(:)
+   v_a(:) = matmul(zsq(:), p_a(:,:)) - mu_a(:)*mu_a(:)
 
    ! Calculate the local GCV-optimal slope shrinkage factors.
+   s_f(:) = 0.0_r8
+   s_a(:) = 0.0_r8
    do i = 1, ens_size
-
-      ! Weighted response variances, calculated in centered form
-      v_f = 0.0_r8
-      v_a = 0.0_r8
-
-      do j = 1, ens_size
-         tmp = ens(j) - mu_f(i)
-         v_f = v_f + p_f(j,i)*tmp*tmp
-
-         tmp = ens(j) - mu_a(i)
-         v_a = v_a + p_a(j,i)*tmp*tmp
-      end do
-
       ! GCV shrinkage for the prior evaluation point
-      s_f(i) = 0.0_r8
-      if (v_f > 0.0_r8 .and. vx_f(i) > 0.0_r8) then
-         r2 = vx_f(i)*b_f(i)**2 / v_f
-         r2 = min(1.0_r8, max(0.0_r8, r2))
+      if (v_f(i) > 0.0_r8 .and. vx_f(i) > 0.0_r8) then
+         r2 = vx_f(i)*b_f(i)**2 / v_f(i)
+         r2 = min(1.0_r8, max(1.0e-8_r8, r2))
          s_f(i) = gcv_shrinkage(r2, k)
       end if
 
       ! GCV shrinkage for the posterior evaluation point
-      s_a(i) = 0.0_r8
-      if (v_a > 0.0_r8 .and. vx_a(i) > 0.0_r8) then
-         r2 = vx_a(i)*b_a(i)**2 / v_a
-         r2 = min(1.0_r8, max(0.0_r8, r2))
+      if (v_a(i) > 0.0_r8 .and. vx_a(i) > 0.0_r8) then
+         r2 = vx_a(i)*b_a(i)**2 / v_a(i)
+         r2 = min(1.0_r8, max(1.0e-8_r8, r2))
          s_a(i) = gcv_shrinkage(r2, k)
       end if
-
    end do
 
    ! Compute the regression increments
