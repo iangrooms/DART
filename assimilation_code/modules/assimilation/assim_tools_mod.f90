@@ -390,7 +390,7 @@ real(r8) :: lower_bound,   upper_bound
 real(r8) :: probit_ens(ens_size)
 
 ! Variables for LOWESS regression
-logical  :: lowess
+logical  :: use_lowess, gcv_lowess
 integer  :: k_lowess ! number of nearest neighbors
 real(r8), allocatable :: p_f(:,:), p_a(:,:)
 real(r8), allocatable :: q_f(:,:), q_a(:,:)
@@ -786,10 +786,10 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
    !call test_close_obs_dist(close_state_dist, num_close_states, i)
 
    ! Initialize LOWESS regression
-   call regression_alg_info(base_obs_kind, lowess)
-   if (lowess) call lowess_precompute(ens_size, k_lowess, obs_prior, obs_inc, &
-                                      p_f, q_f, vx_f, d_f, &
-                                      p_a, q_a, vx_a, d_a)
+   call regression_alg_info(base_obs_kind, use_lowess, gcv_lowess)
+   if (use_lowess) call lowess_precompute(ens_size, k_lowess, obs_prior, obs_inc, &
+                                          p_f, q_f, vx_f, d_f, &
+                                          p_a, q_a, vx_a, d_a)
 
    ! Loop through to update each of my state variables that is potentially close
    STATE_UPDATE: do j = 1, num_close_states
@@ -809,7 +809,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
 
       if(final_factor <= 0.0_r8) cycle STATE_UPDATE
 
-      if (.not. lowess) then
+      if (.not. use_lowess) then
          call obs_updates_ens(ens_size, num_groups, ens_handle%copies(1:ens_size, state_index), &
             my_state_loc(state_index), my_state_kind(state_index), obs_prior, obs_inc, &
             obs_prior_mean, obs_prior_var, base_obs_loc, base_obs_type, obs_time, &
@@ -818,7 +818,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
       else
          call obs_updates_ens_lowess(ens_size, ens_handle%copies(1:ens_size, state_index), obs_prior, &
             obs_prior_mean, obs_prior_var, k_lowess, p_f, q_f, vx_f, d_f, p_a, q_a, vx_a, d_a, &
-            final_factor, correl, local_varying_ss_inflate, inflate_only)
+            gcv_lowess, final_factor, correl, local_varying_ss_inflate, inflate_only)
       end if
 
       ! Compute spatially-varying state space inflation
@@ -854,7 +854,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
 
             if(final_factor <= 0.0_r8) cycle OBS_UPDATE
 
-            if (.not. lowess) then
+            if (.not. use_lowess) then
                call obs_updates_ens(ens_size, num_groups, obs_ens_handle%copies(1:ens_size, obs_index), &
                   my_obs_loc(obs_index), my_obs_kind(obs_index), obs_prior, obs_inc, &
                   obs_prior_mean, obs_prior_var, base_obs_loc, base_obs_type, obs_time, &
@@ -863,7 +863,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
             else
                call obs_updates_ens_lowess(ens_size, obs_ens_handle%copies(1:ens_size, obs_index), obs_prior, &
                   obs_prior_mean, obs_prior_var, k_lowess, p_f, q_f, vx_f, d_f, p_a, q_a, vx_a, d_a, &
-                  final_factor, correl, .false., inflate_only)
+                  gcv_lowess, final_factor, correl, .false., inflate_only)
             end if
          endif
       end do OBS_UPDATE
@@ -938,7 +938,7 @@ deallocate(close_state_dist,      &
            my_state_loc,          &
            obs_probit_trans_ok)
 
-if (lowess) then
+if (use_lowess) then
    deallocate(p_f, p_a, q_f, q_a)
    deallocate(vx_f, vx_a, d_f, d_a)
 end if
@@ -2355,7 +2355,7 @@ end subroutine obs_updates_ens
 
 subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_prior_var, &
                                   k, p_f, q_f, vx_f, d_f, p_a, q_a, vx_a, d_a, &
-                                  final_factor, correl, correl_needed, inflate_only)
+                                  gcv_lowess, final_factor, correl, correl_needed, inflate_only)
    ! Arguments
    integer,             intent(in)    :: ens_size, k
    real(r8),            intent(inout) :: ens(ens_size)
@@ -2367,7 +2367,7 @@ subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_
    real(r8),            intent(in)    :: d_f(ens_size),  d_a(ens_size)
    real(r8),            intent(in)    :: final_factor
    real(r8),            intent(out)   :: correl(1)
-   logical,             intent(in)    :: correl_needed, inflate_only
+   logical,             intent(in)    :: gcv_lowess, correl_needed, inflate_only
 
    ! Local variables
    integer  :: i, j
@@ -2379,48 +2379,54 @@ subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_
    real(r8) :: v_f(ens_size), v_a(ens_size)
    real(r8) :: r2, center, obs_state_cov, state_mean
 
-   ! Center the response vector for numerical stability in variance calculation.
-   center = sum(ens) / ens_size
-   z(:) = ens(:) - center
-   zsq(:) = z(:) * z(:)
+   if (gcv_lowess) then
+      ! Center the response vector for numerical stability in variance calculation.
+      center = sum(ens) / ens_size
+      z(:) = ens(:) - center
+      zsq(:) = z(:) * z(:)
 
-   ! Local weighted response means. These are not the actual means because of
-   ! centering, but when we subtract mu_a - mu_f to get the increment the
-   ! centering cancels.
-   mu_f(:) = matmul(z(:), p_f(:,:))
-   mu_a(:) = matmul(z(:), p_a(:,:))
+      ! Local weighted response means. These are not the actual means because of
+      ! centering, but when we subtract mu_a - mu_f to get the increment the
+      ! centering cancels.
+      mu_f(:) = matmul(z(:), p_f(:,:))
+      mu_a(:) = matmul(z(:), p_a(:,:))
 
-   ! Unregularized local regression slopes. Centering, i.e. replacing ens(:) with
-   ! z(:) is justified here because matmul(ones(:), q_{f,a}(:)) = 0
-   b_f(:) = matmul(z(:), q_f(:,:))
-   b_a(:) = matmul(z(:), q_a(:,:))
+      ! Unregularized local regression slopes. Centering, i.e. replacing ens(:) with
+      ! z(:) is justified here because matmul(ones(:), q_{f,a}(:)) = 0
+      b_f(:) = matmul(z(:), q_f(:,:))
+      b_a(:) = matmul(z(:), q_a(:,:))
 
-   ! Local weighted response variances. The centering above improves numerical
-   ! stability of this calculation.
-   v_f(:) = matmul(zsq(:), p_f(:,:)) - mu_f(:)*mu_f(:)
-   v_a(:) = matmul(zsq(:), p_a(:,:)) - mu_a(:)*mu_a(:)
+      ! Local weighted response variances. The centering above improves numerical
+      ! stability of this calculation.
+      v_f(:) = matmul(zsq(:), p_f(:,:)) - mu_f(:)*mu_f(:)
+      v_a(:) = matmul(zsq(:), p_a(:,:)) - mu_a(:)*mu_a(:)
 
-   ! Calculate the local GCV-optimal slope shrinkage factors.
-   s_f(:) = 0.0_r8
-   s_a(:) = 0.0_r8
-   do i = 1, ens_size
-      ! GCV shrinkage for the prior evaluation point
-      if (v_f(i) > 0.0_r8 .and. vx_f(i) > 0.0_r8) then
-         r2 = vx_f(i)*b_f(i)**2 / v_f(i)
-         r2 = min(1.0_r8, max(1.0e-8_r8, r2))
-         s_f(i) = gcv_shrinkage(r2, k)
-      end if
+      ! Calculate the local GCV-optimal slope shrinkage factors.
+      s_f(:) = 0.0_r8
+      s_a(:) = 0.0_r8
+      do i = 1, ens_size
+         ! GCV shrinkage for the prior evaluation point
+         if (v_f(i) > 0.0_r8 .and. vx_f(i) > 0.0_r8) then
+            r2 = vx_f(i)*b_f(i)**2 / v_f(i)
+            r2 = min(1.0_r8, max(1.0e-8_r8, r2))
+            s_f(i) = gcv_shrinkage(r2, k)
+         end if
 
-      ! GCV shrinkage for the posterior evaluation point
-      if (v_a(i) > 0.0_r8 .and. vx_a(i) > 0.0_r8) then
-         r2 = vx_a(i)*b_a(i)**2 / v_a(i)
-         r2 = min(1.0_r8, max(1.0e-8_r8, r2))
-         s_a(i) = gcv_shrinkage(r2, k)
-      end if
-   end do
-
-   ! Compute the regression increments
-   regression_increment = mu_a - mu_f + d_a*s_a*b_a - d_f*s_f*b_f
+         ! GCV shrinkage for the posterior evaluation point
+         if (v_a(i) > 0.0_r8 .and. vx_a(i) > 0.0_r8) then
+            r2 = vx_a(i)*b_a(i)**2 / v_a(i)
+            r2 = min(1.0_r8, max(1.0e-8_r8, r2))
+            s_a(i) = gcv_shrinkage(r2, k)
+         end if
+      end do
+      ! Compute the regression increments
+      regression_increment = mu_a - mu_f + d_a*s_a*b_a - d_f*s_f*b_f
+   else
+      ! Unregularized local regression slopes.
+      b_f(:) = matmul(ens(:), q_f(:,:))
+      b_a(:) = matmul(ens(:), q_a(:,:))
+      regression_increment = matmul(ens(:), p_a(:,:) - p_f(:,:)) + d_a*b_a - d_f*b_f
+   end if
 
    ! Get the updated ensemble
    if(.not. inflate_only) ens(:) = ens(:) + final_factor * regression_increment(:)
