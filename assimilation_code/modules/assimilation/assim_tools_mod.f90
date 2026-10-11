@@ -390,12 +390,12 @@ real(r8) :: lower_bound,   upper_bound
 real(r8) :: probit_ens(ens_size)
 
 ! Variables for LOWESS regression
-logical  :: lowess, lowess_loc
+logical  :: lowess
 integer  :: k_lowess ! number of nearest neighbors
-real(r8), allocatable :: weights_prior(:,:)
-real(r8), allocatable :: weights_diff(:,:)
-real(r8), allocatable :: weights_diff_cnorm2(:)
-real(r8) :: df_error, Z_CRITICAL
+real(r8), allocatable :: p_f(:,:), p_a(:,:)
+real(r8), allocatable :: q_f(:,:), q_a(:,:)
+real(r8), allocatable :: vx_f(:), vx_a(:)
+real(r8), allocatable :: d_f(:), d_a(:)
 
 ! allocate rather than dump all this on the stack
 allocate(close_obs_dist(     obs_ens_handle%my_num_vars), &
@@ -419,10 +419,13 @@ allocate(close_state_dist(     ens_handle%my_num_vars), &
 if (.not. module_initialized) call assim_tools_init()
 
 ! Initialize k and allocate for LOWESS regression
-k_lowess = max(5, ens_size / 2)
-allocate(weights_prior(ens_size, ens_size), &
-      weights_diff( ens_size, ens_size), &
-      weights_diff_cnorm2(    ens_size))
+k_lowess = min(ens_size - 1, int(60._r8 * sqrt(real(ens_size, r8) / 180._r8)))
+allocate(p_f(ens_size, ens_size), &
+         p_a(ens_size, ens_size), &
+         q_f(ens_size, ens_size), &
+         q_a(ens_size, ens_size))
+allocate(vx_f(ens_size), vx_a(ens_size), &
+         d_f(ens_size),  d_a(ens_size))
 
 !HK make window for mpi one-sided communication
 ! used for vertical conversion in get_close_obs
@@ -783,10 +786,10 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
    !call test_close_obs_dist(close_state_dist, num_close_states, i)
 
    ! Initialize LOWESS regression
-   call regression_alg_info(base_obs_kind, lowess, lowess_loc, Z_CRITICAL)
-   if (ens_size < k_lowess) lowess = .false.
-   if (lowess) call lowess_precompute(ens_size, k_lowess, obs_prior, obs_inc, lowess_loc, weights_prior, &
-      weights_diff, weights_diff_cnorm2, df_error)
+   call regression_alg_info(base_obs_kind, lowess)
+   if (lowess) call lowess_precompute(ens_size, k_lowess, obs_prior, obs_inc, &
+                                      p_f, q_f, vx_f, d_f, &
+                                      p_a, q_a, vx_a, d_a)
 
    ! Loop through to update each of my state variables that is potentially close
    STATE_UPDATE: do j = 1, num_close_states
@@ -814,8 +817,8 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
             my_state_indx(state_index), final_factor, correl, local_varying_ss_inflate, inflate_only)
       else
          call obs_updates_ens_lowess(ens_size, ens_handle%copies(1:ens_size, state_index), obs_prior, &
-            obs_prior_mean, obs_prior_var, k_lowess, weights_prior, weights_diff, weights_diff_cnorm2, df_error, &
-            final_factor, correl, local_varying_ss_inflate, inflate_only, lowess_loc, Z_CRITICAL)
+            obs_prior_mean, obs_prior_var, k_lowess, p_f, q_f, vx_f, d_f, p_a, q_a, vx_a, d_a, &
+            final_factor, correl, local_varying_ss_inflate, inflate_only)
       end if
 
       ! Compute spatially-varying state space inflation
@@ -859,8 +862,8 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
                   -1*my_obs_indx(obs_index), final_factor, correl, .false., inflate_only)
             else
                call obs_updates_ens_lowess(ens_size, obs_ens_handle%copies(1:ens_size, obs_index), obs_prior, &
-                  obs_prior_mean, obs_prior_var, k_lowess, weights_prior, weights_diff, weights_diff_cnorm2, &
-                  df_error, final_factor, correl, .false., inflate_only, lowess_loc, Z_CRITICAL)
+                  obs_prior_mean, obs_prior_var, k_lowess, p_f, q_f, vx_f, d_f, p_a, q_a, vx_a, d_a, &
+                  final_factor, correl, .false., inflate_only)
             end if
          endif
       end do OBS_UPDATE
@@ -936,9 +939,8 @@ deallocate(close_state_dist,      &
            obs_probit_trans_ok)
 
 if (lowess) then
-   deallocate(weights_prior, &
-              weights_diff,  &
-              weights_diff_cnorm2)
+   deallocate(p_f, p_a, q_f, q_a)
+   deallocate(vx_f, vx_a, d_f, d_a)
 end if
 ! end dealloc
 
@@ -1610,132 +1612,144 @@ function get_correl(ens_size,state,state_mean,obs_prior_var,obs_state_cov) resul
 end function get_correl
 
 !------------------------------------------------------------------------
+!> Computes GCV localization/shrinkage factor
+
+pure real(r8) function gcv_shrinkage(r2, k) result(s)
+   real(r8), intent(in) :: r2
+   integer,  intent(in) :: k
+
+   s = 0.0_r8
+
+   if (k <= 2) return
+
+   if (r2 > 1.0_r8 / real(k-1, r8)) then
+      s = ((k-1)*r2 - 1.0_r8) / ((k-2)*r2)
+   end if
+
+end function gcv_shrinkage
+
+!------------------------------------------------------------------------
 !> Precomputes weights and nearest-neighbor indices needed for local, weighted linear regression of a {state,obs}
 !> variable onto an observation.
 
-subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, lowess_loc, weights_prior, weights_diff, &
-                             weights_diff_cnorm2, df_error)
+
+subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, &
+                            p_f, q_f, vx_f, d_f, &
+                            p_a, q_a, vx_a, d_a)
+
    ! Inputs
-   integer,  intent(in)  :: ens_size, k                     ! ensemble size, size of local ensemble
-   real(r8), intent(in)  :: obs_prior(ens_size)             ! Prior ensemble in observation space
-   real(r8), intent(in)  :: obs_inc(ens_size)               ! Observation ensemble increments
-   logical,  intent(in)  :: lowess_loc                      ! Precompute for "localization"
+   integer,  intent(in) :: ens_size, k
+   real(r8), intent(in) :: obs_prior(ens_size)
+   real(r8), intent(in) :: obs_inc(ens_size)
 
    ! Outputs
-   real(r8), intent(out) :: weights_prior(ens_size, ens_size)  ! Effective weights for the prior
-   real(r8), intent(out) :: weights_diff(ens_size, ens_size)   ! Effective weights for the posterior minus prior
-   real(r8), intent(out) :: weights_diff_cnorm2(ens_size)      ! squared 2 norm of columns of weights_diff
-   real(r8), intent(out) :: df_error                           ! Tr[(I - S)^T(I-S)] where S^T is weights_prior
+   ! First matrix index: training ensemble member
+   ! Second matrix index: evaluation ensemble member
+   real(r8), intent(out) :: p_f(ens_size, ens_size)
+   real(r8), intent(out) :: q_f(ens_size, ens_size)
+   real(r8), intent(out) :: p_a(ens_size, ens_size)
+   real(r8), intent(out) :: q_a(ens_size, ens_size)
+   real(r8), intent(out) :: vx_f(ens_size), d_f(ens_size)
+   real(r8), intent(out) :: vx_a(ens_size), d_a(ens_size)
 
    ! Local variables
-   integer  :: idx_prior(k,ens_size)           ! Indices of k nearest neighbors to prior in observation space
-   integer  :: idx_posterior(k,ens_size)       ! Indices of k nearest neighbors to posterior in observation space
-   real(r8) :: weights_posterior(ens_size, ens_size)  ! Effective weights for the posterior
-   integer  :: i, j, l_start, l_end, local_idx
+   integer  :: idx(k)
    integer  :: idx_sort(ens_size)
+   integer  :: i, j, l, local_idx
    real(r8) :: obs_prior_sorted(ens_size)
    real(r8) :: obs_target, obs_dist, u, tmp
-   real(r8) :: S0, S1, S2, denom, bw
-   real(r8) :: w(k)  ! kernel weights
-   real(r8) :: tr_S, tr_STS ! S is weights_prior^T
+   real(r8) :: S0, S1, S2, C, denom, bw
+   real(r8) :: vx, d
+   real(r8) :: w(k)
+   real(r8) :: p(ens_size), q(ens_size)
 
-   ! Get sort permutation for prior obs ensemble
+   ! Sort the training predictors, retaining the permutation.
    call index_sort(obs_prior, idx_sort, ens_size)
    obs_prior_sorted(:) = sort(obs_prior(:))
 
-   ! Get weights and neighbors for the prior
-   !! and auxiliary values tr_S and tr_STS for df_error
-   weights_prior(:,:)     = 0.0_r8
-   weights_posterior(:,:) = 0.0_r8
-   tr_S   = 0.0_r8
-   tr_STS = 0.0_r8
-   do i = 1, ens_size
-      obs_target = obs_prior(i)
+   ! Loop over prior (l=1) and posterior (l=2) evaluation points.
+   do l = 1, 2
 
-      ! Get indices of k nearest neighbors of this posterior observation value
-      call get_k_neighbors(obs_target, k, ens_size, obs_prior_sorted, idx_prior(:,i), bw)
+      do i = 1, ens_size
 
-      ! Compute local moments S0, S1, S2 centered at obs_target
-      S0 = 0.0_r8; S1 = 0.0_r8; S2 = 0.0_r8
-      do j = 1, k
-         obs_dist = obs_prior_sorted(idx_prior(j,i)) - obs_target
-
-         ! Epanechnikov kernel: (1 - (|dh|/bw)^2)
-         u = abs(obs_dist) / bw
-         if (u < 1.0_r8) then
-            w(j) = 1.0_r8 - u * u
+         if (l == 1) then
+            obs_target = obs_prior(i)
          else
-            w(j) = 0.0_r8
+            obs_target = obs_prior(i) + obs_inc(i)
          end if
 
-         S0  = S0 + w(j)
-         tmp = w(j) * obs_dist
-         S1  = S1 + tmp
-         S2  = S2 + tmp * obs_dist
-      end do
+         ! Find the K nearest training predictors and bandwidth.
+         call get_k_neighbors(obs_target, k, ens_size, &
+                              obs_prior_sorted, idx, bw)
 
-      ! Get denominator in effective-weight formula
-      denom = S0 * S2 - S1 * S1
-      if (abs(denom) < 1.0e-12_r8) denom = 1.0e-12_r8
+         ! Compute kernel weights and local predictor moments.
+         S0 = 0.0_r8
+         S1 = 0.0_r8
+         S2 = 0.0_r8
 
-      ! Compute effective weights and df_error
+         do j = 1, k
+            obs_dist = obs_prior_sorted(idx(j)) - obs_target
 
-      do j = 1, k
-         obs_dist = obs_prior_sorted(idx_prior(j,i)) - obs_target
-         tmp      = w(j) * (S2 - obs_dist * S1) / denom
-         weights_prior(idx_sort(idx_prior(j,i)), i) = tmp
-         if (lowess_loc) tr_STS   = tr_STS + tmp**2
-      end do
-      if (lowess_loc) tr_S = tr_S + weights_prior(i,i)
-   end do
-   if (lowess_loc) then
-      df_error = max(real(ens_size,r8) - 2*tr_S + tr_STS, 1._r8) ! Not sure the max(., 1) is really necessary - being safe
-   else
-      df_error = 1.0_r8
-   end if
+            ! Epanechnikov kernel
+            u = obs_dist / bw
+            w(j) = max(0.0_r8, 1.0_r8 - u*u)
 
-   ! Get weights and neighbors for the posterior
-   do i = 1, ens_size
-      obs_target = obs_prior(i) + obs_inc(i)
+            S0 = S0 + w(j)
+            tmp = w(j) * obs_dist
+            S1 = S1 + tmp
+            S2 = S2 + tmp * obs_dist
+         end do
 
-      ! Get indices of k nearest neighbors of this posterior observation value
-      call get_k_neighbors(obs_target, k, ens_size, obs_prior_sorted, idx_posterior(:,i), bw)
+         ! Distance from target to weighted predictor mean.
+         d = -S1 / S0
 
-      ! Compute local moments S0, S1, S2 centered at obs_target
-      S0 = 0.0_r8; S1 = 0.0_r8; S2 = 0.0_r8
-      do j = 1, k
-         obs_dist = obs_prior_sorted(idx_posterior(j,i)) - obs_target
+         ! Weighted centered predictor sum of squares.
+         C = S2 - S1*S1/S0
 
-         ! Epanechnikov kernel: (1 - (|dh|/bw)^2)
-         u = abs(obs_dist) / bw
-         if (u < 1.0_r8) then
-            w(j) = 1.0_r8 - u * u
+         ! Normalized weighted predictor variance. (v = variance, x = predictor, which is an obs variable here)
+         vx = max(0.0_r8, C/S0)
+
+         ! Local constant weights and slope coefficients.
+         p(:) = 0.0_r8
+         q(:) = 0.0_r8
+
+         ! Avoid dividing by a nearly singular local
+         ! regression denominator.
+         if (C > 100.0_r8*epsilon(C)*S2) then
+            denom = S0*C
+
+            do j = 1, k
+               local_idx = idx_sort(idx(j))
+               obs_dist = obs_prior_sorted(idx(j)) - obs_target
+
+               p(local_idx) = w(j) / S0
+               q(local_idx) = w(j) * (S0*obs_dist - S1) / denom
+            end do
          else
-            w(j) = 0.0_r8
+            ! Degenerate neighborhood: local constant fit.
+            vx = 0.0_r8
+
+            do j = 1, k
+               local_idx = idx_sort(idx(j))
+               p(local_idx) = w(j) / S0
+            end do
          end if
 
-         S0  = S0 + w(j)
-         tmp = w(j) * obs_dist
-         S1  = S1 + tmp
-         S2  = S2 + tmp * obs_dist
-      end do
+         ! Store results for this evaluation point.
+         if (l == 1) then
+            p_f(:,i) = p(:)
+            q_f(:,i) = q(:)
+            vx_f(i) = vx
+            d_f(i) = d
+         else
+            p_a(:,i) = p(:)
+            q_a(:,i) = q(:)
+            vx_a(i) = vx
+            d_a(i) = d
+         end if
 
-      ! Get denominator in effective-weight formula
-      denom = S0 * S2 - S1 * S1
-      if (abs(denom) < 1.0e-12_r8) denom = 1.0e-12_r8
-
-      ! Compute effective weights
-      do j = 1, k
-         obs_dist = obs_prior_sorted(idx_posterior(j,i)) - obs_target
-         weights_posterior(idx_sort(idx_posterior(j,i)), i) = w(j) * (S2 - obs_dist * S1) / denom
       end do
    end do
-   weights_diff(:,:) = weights_posterior(:,:) - weights_prior(:,:)
-   if (lowess_loc) then
-      weights_diff_cnorm2(:) = sum(weights_diff(:,:)**2, 1)
-   else
-      weights_diff_cnorm2(:) = 0.0_r8
-   end if
 
 end subroutine lowess_precompute
 
@@ -2347,55 +2361,73 @@ end subroutine obs_updates_ens
 !---------------------------------------------------------------
 
 subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_prior_var, &
-                                  k, weights_prior, weights_diff, weights_diff_cnorm2, df_error, &
-                                  final_factor, correl, correl_needed, inflate_only, lowess_loc, &
-                                  Z_CRITICAL)
+                                  k, p_f, q_f, vx_f, d_f, p_a, q_a, vx_a, d_a, &
+                                  final_factor, correl, correl_needed, inflate_only)
    ! Arguments
-   integer,             intent(in)    :: ens_size
+   integer,             intent(in)    :: ens_size, k
    real(r8),            intent(inout) :: ens(ens_size)
    real(r8),            intent(in)    :: obs_prior(ens_size)
-   real(r8),            intent(in)    :: obs_prior_mean(1)
-   real(r8),            intent(in)    :: obs_prior_var(1)
-   integer,             intent(in)    :: k
-   real(r8),            intent(in)    :: weights_prior(ens_size, ens_size)
-   real(r8),            intent(in)    :: weights_diff( ens_size, ens_size)
-   real(r8),            intent(in)    :: weights_diff_cnorm2(ens_size)
-   real(r8),            intent(in)    :: df_error
+   real(r8),            intent(in)    :: obs_prior_mean(1), obs_prior_var(1)
+   real(r8),            intent(in)    :: p_f(ens_size,ens_size), p_a(ens_size,ens_size)
+   real(r8),            intent(in)    :: q_f(ens_size,ens_size), q_a(ens_size,ens_size)
+   real(r8),            intent(in)    :: vx_f(ens_size), vx_a(ens_size)
+   real(r8),            intent(in)    :: d_f(ens_size),  d_a(ens_size)
    real(r8),            intent(in)    :: final_factor
    real(r8),            intent(out)   :: correl(1)
-   logical,             intent(in)    :: correl_needed
-   logical,             intent(in)    :: inflate_only
-   logical,             intent(in)    :: lowess_loc
-   real(r8),            intent(in)    :: Z_CRITICAL
+   logical,             intent(in)    :: correl_needed, inflate_only
 
    ! Local variables
    integer  :: i, j
-   real(r8) :: regression_increment(ens_size) ! regression increments
+   real(r8) :: mu_f(ens_size), mu_a(ens_size)
+   real(r8) :: b_f(ens_size), b_a(ens_size)
+   real(r8) :: s_f(ens_size), s_a(ens_size)
+   real(r8) :: regression_increment(ens_size)
+   real(r8) :: v_f, v_a, r2, tmp
    real(r8) :: obs_state_cov, state_mean
-   real(r8) :: regression_prediction(ens_size),regression_residual(ens_size)
-   real(r8) :: sigma2_hat ! sample estimate of LOWESS regression residual variance
-   real(r8) :: z_stat, se         ! test statistic, standard error
 
-   ! Compute the increment
-   regression_increment(:) = matmul(ens(:),weights_diff(:,:))
+   ! Local weighted response means
+   mu_f = matmul(ens, p_f)
+   mu_a = matmul(ens, p_a)
 
-   ! "localization"
-   if (lowess_loc) then
-      regression_prediction(:) = matmul(ens(:), weights_prior(:,:))
-      regression_residual(:)   = ens(:) - regression_prediction(:)
-      sigma2_hat = sum(regression_residual(:)**2) / df_error
-      do i = 1, ens_size
-         se = sqrt(sigma2_hat * weights_diff_cnorm2(i))
-         ! Guard against division by zero in case of identical weights or zero variance
-         if (se > 1.0e-12_r8) then
-            z_stat = abs(regression_increment(i)) / se
-         else
-            z_stat = 0.0_r8
-         end if
-         ! Apply the significance mask. 1.28->0.2, 1.64->0.1, 1.96->0.05
-         if (z_stat <= Z_CRITICAL) regression_increment(i) = 0.0_r8
+   ! Unregularized local regression slopes
+   b_f = matmul(ens, q_f)
+   b_a = matmul(ens, q_a)
+
+   ! Calculate the local GCV-optimal slope shrinkage factors.
+   do i = 1, ens_size
+
+      ! Weighted response variances, calculated in centered form
+      v_f = 0.0_r8
+      v_a = 0.0_r8
+
+      do j = 1, ens_size
+         tmp = ens(j) - mu_f(i)
+         v_f = v_f + p_f(j,i)*tmp*tmp
+
+         tmp = ens(j) - mu_a(i)
+         v_a = v_a + p_a(j,i)*tmp*tmp
       end do
-   end if
+
+      ! GCV shrinkage for the prior evaluation point
+      s_f(i) = 0.0_r8
+      if (v_f > 0.0_r8 .and. vx_f(i) > 0.0_r8) then
+         r2 = vx_f(i)*b_f(i)**2 / v_f
+         r2 = min(1.0_r8, max(0.0_r8, r2))
+         s_f(i) = gcv_shrinkage(r2, k)
+      end if
+
+      ! GCV shrinkage for the posterior evaluation point
+      s_a(i) = 0.0_r8
+      if (v_a > 0.0_r8 .and. vx_a(i) > 0.0_r8) then
+         r2 = vx_a(i)*b_a(i)**2 / v_a
+         r2 = min(1.0_r8, max(0.0_r8, r2))
+         s_a(i) = gcv_shrinkage(r2, k)
+      end if
+
+   end do
+
+   ! Compute the regression increments
+   regression_increment = mu_a - mu_f + d_a*s_a*b_a - d_f*s_f*b_f
 
    ! Get the updated ensemble
    if(.not. inflate_only) ens(:) = ens(:) + final_factor * regression_increment(:)

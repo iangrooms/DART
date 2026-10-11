@@ -86,13 +86,11 @@ type algorithm_info_type
    type(probit_extended_state_type) :: probit_extended_state
    type(obs_inc_info_type)          :: obs_inc_info
    logical                          :: use_lowess = .false.  ! Default value; can be over-written by QCEFF table
-   logical                          :: lowess_loc = .false.  ! Default value; can be over-written by QCEFF table
-   real(r8)                         :: Z_CRITICAL = 1.64_r8  ! Default value; can be over-written by QCEFF table
 end type
 
 integer, parameter :: HEADER_LINES = 2
 character(len=129), dimension(4) :: header1
-character(len=129), dimension(28) :: header2 ! Number of table columns plus 1
+character(len=129), dimension(26) :: header2 ! Number of table columns plus 1
 
 integer, allocatable :: specified_qtys(:)
 type(algorithm_info_type), allocatable :: qceff_table_data(:)
@@ -203,7 +201,7 @@ do row = 1, size(qceff_table_data)
                    qceff_table_data(row)%probit_extended_state%lower_bound, qceff_table_data(row)%probit_extended_state%upper_bound, &
                    filter_kind_string(row), qceff_table_data(row)%obs_inc_info%bounded_below, qceff_table_data(row)%obs_inc_info%bounded_above, &
                    qceff_table_data(row)%obs_inc_info%lower_bound, qceff_table_data(row)%obs_inc_info%upper_bound, &
-                   qceff_table_data(row)%use_lowess, qceff_table_data(row)%lowess_loc, qceff_table_data(row)%Z_CRITICAL
+                   qceff_table_data(row)%use_lowess
    
    call to_upper(qty_string)
    specified_qtys(row) = get_index_for_quantity(qty_string)  
@@ -533,11 +531,10 @@ end subroutine obs_inc_info
 !-------------------------------------------------------------------------
 
 
-subroutine regression_alg_info(qty, use_lowess, lowess_loc, Z_CRITICAL)
+subroutine regression_alg_info(qty, use_lowess)
 
 integer,  intent(in)  :: qty
-logical,  intent(out) :: use_lowess, lowess_loc
-real(r8), intent(out) :: Z_CRITICAL
+logical,  intent(out) :: use_lowess
 
 integer :: QTY_loc(1)
 
@@ -546,8 +543,6 @@ if (.not. module_initialized) call init_algorithm_info_mod()
 !use default values if qceff_table_filename is not in namelist
 if (use_qty_defaults) then
    use_lowess = .false.
-   lowess_loc = .false.
-   Z_CRITICAL = MISSING_R8
    return
 endif
 
@@ -556,12 +551,8 @@ QTY_loc = findloc(specified_qtys, qty)
 if (QTY_loc(1) == 0) then
    !use default values if QTY is not in table
    use_lowess = .false.
-   lowess_loc = .false.
-   Z_CRITICAL = MISSING_R8
 else
    use_lowess = qceff_table_data(QTY_loc(1))%use_lowess
-   lowess_loc = qceff_table_data(QTY_loc(1))%lowess_loc
-   Z_CRITICAL = qceff_table_data(QTY_loc(1))%Z_CRITICAL
 endif
 
 end subroutine regression_alg_info
@@ -637,14 +628,6 @@ do row = 1, size(qceff_table_data)
    endif
 end do
 
-! Verify that Z_CRITICAL is never <=0
-do row = 1, size(qceff_table_data)
-   if(qceff_table_data(row)%Z_CRITICAL <= 0.0_r8) then
-      write(errstring,*) trim(get_name_for_quantity(specified_qtys(row))), ' requests negative Z_CRITICAL for LOWESS localization'
-      call error_handler(E_ERR, 'verify_qceff_table_data:', errstring, source)
-   endif
-end do
-
 end subroutine verify_qceff_table_data
 
 !------------------------------------------------------------------------
@@ -665,7 +648,7 @@ call error_handler(E_MSG, 'log_qceff_table_data:', 'Logging the data in the QCEF
 write(log_msg, '(2A6, A9, A)') header1(:)
 call error_handler(E_MSG, 'log_qceff_table_data:', trim(log_msg), source)
 
-write(log_msg,'(A10, 2A14, 2A12, 3(A10, 2A14, 2A12), A12, 2A14, 2A12, 3A12)') header2(:)
+write(log_msg,'(A10, 2A14, 2A12, 3(A10, 2A14, 2A12), A12, 2A14, 2A12, A12)') header2(:)
 call error_handler(E_MSG, 'log_qceff_table_data:', trim(log_msg), source)
 
 ! Write the table data to the dart_log and terminal
@@ -680,7 +663,7 @@ do row = 1, size(qceff_table_data)
                qceff_table_data(row)%probit_extended_state%lower_bound, qceff_table_data(row)%probit_extended_state%upper_bound, &
                trim(filter_kind_string(row)), qceff_table_data(row)%obs_inc_info%bounded_below, qceff_table_data(row)%obs_inc_info%bounded_above, &
                qceff_table_data(row)%obs_inc_info%lower_bound, qceff_table_data(row)%obs_inc_info%upper_bound, &
-               qceff_table_data(row)%use_lowess, qceff_table_data(row)%lowess_loc, qceff_table_data(row)%Z_CRITICAL
+               qceff_table_data(row)%use_lowess
 call error_handler(E_MSG, 'log_qceff_table_data:', trim(log_msg), source)
 end do
 
