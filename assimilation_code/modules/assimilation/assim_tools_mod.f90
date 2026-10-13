@@ -787,7 +787,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
 
    ! Initialize LOWESS regression
    call regression_alg_info(base_obs_kind, use_lowess, gcv_lowess)
-   if (use_lowess) call lowess_precompute(ens_size, k_lowess, obs_prior, obs_inc, &
+   if (use_lowess) call lowess_precompute(ens_size, k_lowess, obs_prior, obs_inc, gcv_lowess, &
                                           p_f, q_f, vx_f, d_f, &
                                           p_a, q_a, vx_a, d_a)
 
@@ -1626,7 +1626,7 @@ end function gcv_shrinkage
 !> Precomputes weights and nearest-neighbor indices needed for local, weighted linear regression of a {state,obs}
 !> variable onto an observation.
 
-subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, &
+subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, gcv_lowess, &
                             p_f, q_f, vx_f, d_f, &
                             p_a, q_a, vx_a, d_a)
 
@@ -1634,6 +1634,7 @@ subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, &
    integer,  intent(in) :: ens_size, k
    real(r8), intent(in) :: obs_prior(ens_size)
    real(r8), intent(in) :: obs_inc(ens_size)
+   logical,  intent(in) :: gcv_lowess
 
    ! Outputs
    ! First matrix index: training ensemble member
@@ -1743,6 +1744,12 @@ subroutine lowess_precompute(ens_size, k, obs_prior, obs_inc, &
 
       end do
    end do
+
+   if (.not. gcv_lowess) then
+      do i = 1, ens_size
+         p_f(:,i) = p_a(:,i) - p_f(:,i) + d_a(i)*q_a(:,i) - d_f(i)*q_f(:,i)
+      end do
+   end if
 
 end subroutine lowess_precompute
 
@@ -2422,10 +2429,7 @@ subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_
       ! Compute the regression increments
       regression_increment = mu_a - mu_f + d_a*s_a*b_a - d_f*s_f*b_f
    else
-      ! Unregularized local regression slopes.
-      b_f(:) = matmul(ens(:), q_f(:,:))
-      b_a(:) = matmul(ens(:), q_a(:,:))
-      regression_increment = matmul(ens(:), p_a(:,:) - p_f(:,:)) + d_a*b_a - d_f*b_f
+      regression_increment = matmul(ens(:), p_f(:,:))
    end if
 
    ! Get the updated ensemble
