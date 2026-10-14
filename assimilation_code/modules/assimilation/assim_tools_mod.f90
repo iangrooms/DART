@@ -419,7 +419,7 @@ allocate(close_state_dist(     ens_handle%my_num_vars), &
 if (.not. module_initialized) call assim_tools_init()
 
 ! Initialize k and allocate for LOWESS regression
-k_lowess = min(ens_size - 1, int(60._r8 * sqrt(real(ens_size, r8) / 180._r8)))
+k_lowess = min(ens_size - 1, ens_size / 2)
 allocate(p_f(ens_size, ens_size), &
          p_a(ens_size, ens_size), &
          q_f(ens_size, ens_size), &
@@ -2399,7 +2399,7 @@ subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_
       mu_a(:) = matmul(z(:), p_a(:,:))
 
       ! Unregularized local regression slopes. Centering, i.e. replacing ens(:) with
-      ! z(:) is justified here because matmul(ones(:), q_{f,a}(:)) = 0
+      ! z(:) is justified here because matmul(ones(:), q_{f,a}(:,:)) = 0
       b_f(:) = matmul(z(:), q_f(:,:))
       b_a(:) = matmul(z(:), q_a(:,:))
 
