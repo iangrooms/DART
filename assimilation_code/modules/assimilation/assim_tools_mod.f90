@@ -395,7 +395,7 @@ integer  :: k_lowess ! number of nearest neighbors
 real(r8), allocatable :: weights_prior(:,:)
 real(r8), allocatable :: weights_diff(:,:)
 real(r8), allocatable :: weights_diff_cnorm2(:)
-real(r8) :: df_error, Z_CRITICAL
+real(r8) :: df_error
 
 ! allocate rather than dump all this on the stack
 allocate(close_obs_dist(     obs_ens_handle%my_num_vars), &
@@ -783,7 +783,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
    !call test_close_obs_dist(close_state_dist, num_close_states, i)
 
    ! Initialize LOWESS regression
-   call regression_alg_info(base_obs_kind, lowess, lowess_loc, Z_CRITICAL)
+   call regression_alg_info(base_obs_kind, lowess, lowess_loc)
    if (ens_size < k_lowess) lowess = .false.
    if (lowess) call lowess_precompute(ens_size, k_lowess, obs_prior, obs_inc, lowess_loc, weights_prior, &
       weights_diff, weights_diff_cnorm2, df_error)
@@ -815,7 +815,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
       else
          call obs_updates_ens_lowess(ens_size, ens_handle%copies(1:ens_size, state_index), obs_prior, &
             obs_prior_mean, obs_prior_var, k_lowess, weights_prior, weights_diff, weights_diff_cnorm2, df_error, &
-            final_factor, correl, local_varying_ss_inflate, inflate_only, lowess_loc, Z_CRITICAL)
+            final_factor, correl, local_varying_ss_inflate, inflate_only, lowess_loc)
       end if
 
       ! Compute spatially-varying state space inflation
@@ -860,7 +860,7 @@ SEQUENTIAL_OBS: do i = 1, obs_ens_handle%num_vars
             else
                call obs_updates_ens_lowess(ens_size, obs_ens_handle%copies(1:ens_size, obs_index), obs_prior, &
                   obs_prior_mean, obs_prior_var, k_lowess, weights_prior, weights_diff, weights_diff_cnorm2, &
-                  df_error, final_factor, correl, .false., inflate_only, lowess_loc, Z_CRITICAL)
+                  df_error, final_factor, correl, .false., inflate_only, lowess_loc)
             end if
          endif
       end do OBS_UPDATE
@@ -2348,8 +2348,7 @@ end subroutine obs_updates_ens
 
 subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_prior_var, &
                                   k, weights_prior, weights_diff, weights_diff_cnorm2, df_error, &
-                                  final_factor, correl, correl_needed, inflate_only, lowess_loc, &
-                                  Z_CRITICAL)
+                                  final_factor, correl, correl_needed, inflate_only, lowess_loc)
    ! Arguments
    integer,             intent(in)    :: ens_size
    real(r8),            intent(inout) :: ens(ens_size)
@@ -2366,7 +2365,6 @@ subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_
    logical,             intent(in)    :: correl_needed
    logical,             intent(in)    :: inflate_only
    logical,             intent(in)    :: lowess_loc
-   real(r8),            intent(in)    :: Z_CRITICAL
 
    ! Local variables
    integer  :: i, j
@@ -2374,7 +2372,7 @@ subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_
    real(r8) :: obs_state_cov, state_mean
    real(r8) :: regression_prediction(ens_size),regression_residual(ens_size)
    real(r8) :: sigma2_hat ! sample estimate of LOWESS regression residual variance
-   real(r8) :: z_stat, se         ! test statistic, standard error
+   real(r8) :: z_stat, se2     ! test statistic, squared standard error
 
    ! Compute the increment
    regression_increment(:) = matmul(ens(:),weights_diff(:,:))
@@ -2385,15 +2383,12 @@ subroutine obs_updates_ens_lowess(ens_size, ens, obs_prior, obs_prior_mean, obs_
       regression_residual(:)   = ens(:) - regression_prediction(:)
       sigma2_hat = sum(regression_residual(:)**2) / df_error
       do i = 1, ens_size
-         se = sqrt(sigma2_hat * weights_diff_cnorm2(i))
-         ! Guard against division by zero in case of identical weights or zero variance
-         if (se > 1.0e-12_r8) then
-            z_stat = abs(regression_increment(i)) / se
+         se2 = sigma2_hat * weights_diff_cnorm2(i)
+         if (se2 < regression_increment(i)**2) then
+            regression_increment(i) = regression_increment(i)  - (se2 / regression_increment(i))
          else
-            z_stat = 0.0_r8
+            regression_increment(i) = 0.0_r8
          end if
-         ! Apply the significance mask. 1.28->0.2, 1.64->0.1, 1.96->0.05
-         if (z_stat <= Z_CRITICAL) regression_increment(i) = 0.0_r8
       end do
    end if
 
